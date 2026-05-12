@@ -1,0 +1,11 @@
+{{define "fragments/tail_event.html" -}}
+<div hx-swap-oob="afterbegin:#tail-events">
+  <div class="tail-row tail-row-new" x-data="{}" x-init="setTimeout(() => $el.classList.remove('tail-row-new'), 1000)">
+    <time class="ts" data-ts="{{.TimestampISO}}">{{.TimestampDisplay}}</time>
+    {{if .HasLevel}}<span class="{{.LevelClass}}">{{.LevelLabel}}</span>{{end}}
+    {{if .HasService}}<span class="svc">{{.Service}}</span>{{end}}
+    {{if .HasHost}}<span class="host muted">{{.Host}}</span>{{end}}
+    {{if .HasMessage}}<span class="msg">{{.MessagePreview}}</span>{{end}}
+  </div>
+</div>
+{{- end}}

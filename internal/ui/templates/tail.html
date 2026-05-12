@@ -1,0 +1,65 @@
+{{define "tail.html" -}}
+<!doctype html>
+<html lang="en" x-data="themeController()" x-init="apply()" :data-theme="theme === 'auto' ? null : theme">
+{{template "fragments/head.html" .}}
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+  {{template "fragments/topbar.html" .}}
+  <main id="main" class="view view-tail">
+    <div class="tail" x-data="tailView()">
+      <div class="row search-bar-row">
+        <div class="search-bar" x-data="searchBar()">
+          <span class="search-bar-icon" aria-hidden="true">{{icon "search"}}</span>
+          <input type="text" name="q" autocomplete="off" spellcheck="false"
+            placeholder="service:api level:error"
+            x-ref="input"
+            x-model="q"
+            x-on:input="$dispatch('tail-filter-change', q)"
+            x-on:focus="focused = true"
+            hx-post="/ui/search-suggest"
+            hx-trigger="keyup changed delay:50ms, focus"
+            hx-target="#tail-suggestions"
+            hx-swap="innerHTML"
+            hx-include="closest .search-bar"
+            aria-label="Search query">
+          <input type="hidden" name="cursor_pos" :value="cursorPos()">
+          <button type="button" class="icon-btn" aria-label="Clear" x-on:click="clear()" x-show="q.length > 0">{{icon "x"}}</button>
+          <div id="tail-suggestions" class="suggestions" x-show="focused" x-on:click.outside="focused = false"></div>
+        </div>
+      </div>
+
+      <div class="row tail-controls">
+        <button type="button" class="btn btn-primary" x-on:click="start()" :disabled="!canStart() || running">
+          {{icon "play"}} Start tail
+        </button>
+        <span class="muted">Rate cap: 100/s</span>
+        <span class="status-line">
+          Status:
+          <template x-if="status === 'live'"><span><span class="dot dot-healthy">●</span> live</span></template>
+          <template x-if="status === 'connecting'"><span><span class="dot dot-degraded">●</span> connecting</span></template>
+          <template x-if="status === 'idle'"><span><span class="dot dot-degraded">●</span> idle</span></template>
+          <template x-if="status === 'error'"><span><span class="dot dot-failing">●</span> disconnected</span></template>
+        </span>
+        <span class="muted">Dropped: <span x-text="dropped">0</span></span>
+      </div>
+
+      <hr class="rule">
+
+      <div id="tail-events" class="tail-events" aria-live="polite"
+        x-ref="events"
+        hx-ext="ws"
+        ws-connect="/ui/query/stream"
+        ws-send="false">
+        <p class="placeholder muted">Enter a filter and click "Start tail".</p>
+      </div>
+
+      <div class="row tail-foot">
+        <button type="button" class="btn" x-on:click="togglePause()" x-text="paused ? '▶ Resume auto-scroll' : '⏸ Pause auto-scroll'"></button>
+        <button type="button" class="btn" x-on:click="clearEvents()">Clear</button>
+        <button type="button" class="btn btn-danger" x-on:click="stop()">{{icon "square"}} Stop tail</button>
+      </div>
+    </div>
+  </main>
+</body>
+</html>
+{{- end}}

@@ -1,0 +1,29 @@
+{{define "fragments/facet.html" -}}
+<section class="facet" x-data="{ expanded: true }">
+  <header class="facet-header">
+    <button type="button" class="facet-toggle" x-on:click="expanded = !expanded" :aria-expanded="expanded">
+      <span class="caret" x-show="expanded">{{icon "chevron-down"}}</span>
+      <span class="caret" x-show="!expanded">{{icon "chevron-right"}}</span>
+      <span class="facet-label">{{.Label}}</span>
+      <span class="facet-count muted">{{len .Values}}</span>
+    </button>
+  </header>
+  <ul class="facet-values" x-show="expanded">
+    {{range .Values}}
+    <li class="facet-value">
+      <label>
+        <input type="checkbox"
+          data-field="{{$.Name}}"
+          data-value="{{.Value}}"
+          x-on:change="$dispatch('facet-toggle', { field: '{{$.Name}}', value: '{{.Value}}', checked: $event.target.checked })">
+        <span class="value-text">{{.Value}}</span>
+      </label>
+      <span class="value-count muted">{{formatCount .Count}}</span>
+    </li>
+    {{end}}
+  </ul>
+  {{if .Truncated}}
+  <p class="facet-truncated muted">+ {{.TruncatedCount}} more</p>
+  {{end}}
+</section>
+{{- end}}

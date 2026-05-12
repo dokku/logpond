@@ -1,0 +1,53 @@
+{{define "admin.html" -}}
+<!doctype html>
+<html lang="en" x-data="themeController()" x-init="apply()" :data-theme="theme === 'auto' ? null : theme">
+{{template "fragments/head.html" .}}
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+  {{template "fragments/topbar.html" .}}
+  <main id="main" class="view view-admin">
+    {{with .Page}}
+    <div class="admin">
+      <section class="admin-section">
+        <h2>Retention policy</h2>
+        <dl class="meta">
+          <dt>Max age</dt><dd>{{or .Retention.MaxAge "—"}}</dd>
+          <dt>Max disk size</dt><dd>{{or .Retention.MaxSize "—"}}</dd>
+          <dt>Archive before delete</dt><dd>{{if .Retention.ArchiveBeforeDelete}}yes{{else}}no{{end}}</dd>
+        </dl>
+        <p class="muted">Controls land in Phase 13. Use POST /api/admin/retention/run from the JSON API for now.</p>
+      </section>
+
+      <section class="admin-section">
+        <h2>Archive backend</h2>
+        <dl class="meta">
+          <dt>Type</dt><dd>{{.Archive.Kind}}</dd>
+          <dt>Detail</dt><dd>{{.Archive.Detail}}</dd>
+        </dl>
+        <p class="muted">Use POST /api/admin/archive/verify and GET /api/admin/archive/capabilities for runtime state.</p>
+      </section>
+
+      <section class="admin-section">
+        <h2>Facets</h2>
+        <table class="meta-table">
+          <thead><tr><th>Name</th><th>Field</th><th>Label</th><th>Cap</th><th>Source</th></tr></thead>
+          <tbody>
+            {{range .Facets}}
+            <tr>
+              <td>{{.Name}}</td>
+              <td><code>{{.Field}}</code></td>
+              <td>{{.DisplayLabel}}</td>
+              <td>{{.CardinalityCap}}</td>
+              <td>{{if eq (printf "%s" .Source) ""}}{{.Kind}}{{else}}{{.Source}}{{end}}</td>
+            </tr>
+            {{end}}
+          </tbody>
+        </table>
+        <p class="muted">Facet CRUD lives at /api/facets; UI surfaces land in Phase 13.</p>
+      </section>
+    </div>
+    {{end}}
+  </main>
+</body>
+</html>
+{{- end}}

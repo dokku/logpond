@@ -31,6 +31,7 @@ import (
 	"github.com/dokku/logpond/internal/query"
 	"github.com/dokku/logpond/internal/retention"
 	"github.com/dokku/logpond/internal/segments"
+	"github.com/dokku/logpond/internal/ui"
 	"github.com/dokku/logpond/internal/ws"
 )
 
@@ -207,6 +208,35 @@ func run() error {
 		Fanout:          fanout,
 		LiveTail:        http.HandlerFunc(liveTail.Handle),
 	})
+
+	uiSrv, err := ui.New(ui.Options{
+		Logger:          logger,
+		Executor:        executor,
+		Facets:          facetRegistry,
+		Jobs:            jobManager,
+		MaxTimeRange:    int64(maxTimeRange / time.Second),
+		FacetSampleSize: cfg.Facets.SegmentSampleSize,
+		Archive:         describeArchive(cfg, archiveBackend),
+		Retention: ui.RetentionInfo{
+			MaxAge:              cfg.Retention.MaxAge,
+			MaxSize:             cfg.Retention.MaxSize,
+			ArchiveBeforeDelete: cfg.Retention.ArchiveBeforeDelete,
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("configuring ui: %w", err)
+	}
+	uiSrv.Register(srv.Router())
+
+	// A second WebSocket server emits HTML oob-swap fragments for the
+	// /ui/query/stream live tail view. /api/query/stream stays JSON for
+	// the programmatic API contract (PRD §13.7).
+	htmlTail := ws.New(ws.Options{
+		Fanout:   fanout,
+		Logger:   logger,
+		Renderer: uiSrv.NewHTMLStreamRenderer(),
+	})
+	srv.Router().Get("/ui/query/stream", htmlTail.Handle)
 
 	importWatcher := api.NewImportWatcher(api.ImportWatcherOptions{
 		DataDir: cfg.DataDir,
@@ -423,6 +453,28 @@ func buildArchiveBackend(ctx context.Context, cfg *config.Config, logger *slog.L
 	default:
 		return nil, fmt.Errorf("unsupported archive backend %q", cfg.Archive.Backend)
 	}
+}
+
+// describeArchive renders a short, human-readable summary of the active
+// archive backend for display in the admin UI and top bar.
+func describeArchive(cfg *config.Config, backend archive.Backend) ui.ArchiveInfo {
+	kind := cfg.Archive.Backend
+	if kind == "" {
+		kind = "none"
+	}
+	info := ui.ArchiveInfo{Kind: kind}
+	switch kind {
+	case "s3":
+		info.Detail = fmt.Sprintf("s3://%s/%s", cfg.Archive.S3.Bucket, cfg.Archive.S3.Prefix)
+	case "script":
+		info.Detail = cfg.Archive.Script.Path
+	case "none":
+		info.Detail = "no archive backend configured"
+	}
+	if backend != nil {
+		_ = backend.Capabilities()
+	}
+	return info
 }
 
 // ringBufferEventCap converts the configured ring-buffer memory limit

@@ -1,0 +1,10 @@
+{{define "fragments/load_more.html" -}}
+{{range .Events}}{{template "fragments/result_row.html" .}}{{end}}
+
+{{if .NextCursor}}
+<button type="button" class="btn"
+  hx-get="/ui/load-more?cursor={{.NextCursor}}&request={{.RequestB64}}"
+  hx-target="this"
+  hx-swap="outerHTML">Load more</button>
+{{end}}
+{{- end}}

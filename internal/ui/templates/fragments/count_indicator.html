@@ -1,0 +1,8 @@
+{{define "fragments/count_indicator.html" -}}
+{{if .LowerBound}}
+≈ {{formatCount .Count}}+ events
+{{else}}
+≈ {{formatCount .Count}} events
+{{end}}
+<span class="muted small">in {{.DurationMs}}ms</span>
+{{- end}}

@@ -42,6 +42,19 @@ const (
 	defaultSendQueue        = 256
 )
 
+// Renderer formats fan-out events and subscription status updates into
+// the byte payload written to the WebSocket. The default JSON renderer
+// matches PRD §13.7's wire shape; the UI package supplies an HTML
+// renderer that emits oob-swap fragments for the live tail view.
+//
+// Returning nil from either method tells the server to skip sending
+// that frame entirely (used by the HTML renderer to drop status
+// heartbeats that have no view representation).
+type Renderer interface {
+	Event(ev ingest.Event) []byte
+	Status(filterSummary string, subscribed, rateCapped bool, droppedTotal uint64) []byte
+}
+
 // Options bundles the wiring the server needs. Zero-valued knobs fall
 // back to PRD defaults.
 type Options struct {
@@ -52,6 +65,7 @@ type Options struct {
 	Heartbeat         time.Duration
 	SlowClientGrace   time.Duration
 	SendQueueCapacity int
+	Renderer          Renderer
 
 	// OnClose is invoked when the server initiates a close. Intended
 	// for tests — the WebSocket close frame may not reach the client if
@@ -70,6 +84,7 @@ type Server struct {
 	heartbeat        time.Duration
 	slowClientGrace  time.Duration
 	sendQueueCap     int
+	renderer         Renderer
 	onClose          func(websocket.StatusCode)
 
 	clients atomic.Int64
@@ -96,6 +111,10 @@ func New(opts Options) *Server {
 	if opts.SendQueueCapacity <= 0 {
 		opts.SendQueueCapacity = defaultSendQueue
 	}
+	r := opts.Renderer
+	if r == nil {
+		r = jsonRenderer{}
+	}
 	return &Server{
 		fanout:           opts.Fanout,
 		logger:           opts.Logger,
@@ -104,6 +123,7 @@ func New(opts Options) *Server {
 		heartbeat:        opts.Heartbeat,
 		slowClientGrace:  opts.SlowClientGrace,
 		sendQueueCap:     opts.SendQueueCapacity,
+		renderer:         r,
 		onClose:          opts.OnClose,
 	}
 }
@@ -243,7 +263,7 @@ func (s *Server) runConnection(parent context.Context, conn *websocket.Conn) {
 	go s.writeLoop(ctx, conn, writeQueue, writeErrCh)
 
 	// Acknowledge subscription before delivering any events.
-	if !s.enqueue(writeQueue, statusBytes(current, false, 0)) {
+	if !s.enqueue(writeQueue, s.renderStatus(current, false, 0)) {
 		s.closeWith(conn, CloseSlowClient, "slow client")
 		return
 	}
@@ -289,13 +309,13 @@ func (s *Server) runConnection(parent context.Context, conn *websocket.Conn) {
 				return
 			}
 			current = msg.sub
-			if !s.enqueue(writeQueue, statusBytes(current, rateCappedNow, droppedTotal)) {
+			if !s.enqueue(writeQueue, s.renderStatus(current, rateCappedNow, droppedTotal)) {
 				s.closeWith(conn, CloseSlowClient, "slow client")
 				return
 			}
 
 		case <-heartbeat.C:
-			if !s.enqueue(writeQueue, statusBytes(current, rateCappedNow, droppedTotal)) {
+			if !s.enqueue(writeQueue, s.renderStatus(current, rateCappedNow, droppedTotal)) {
 				s.closeWith(conn, CloseSlowClient, "slow client")
 				return
 			}
@@ -311,7 +331,7 @@ func (s *Server) runConnection(parent context.Context, conn *websocket.Conn) {
 				droppedTotal++
 				if !rateCappedNow {
 					rateCappedNow = true
-					if !s.enqueue(writeQueue, statusBytes(current, rateCappedNow, droppedTotal)) {
+					if !s.enqueue(writeQueue, s.renderStatus(current, rateCappedNow, droppedTotal)) {
 						s.closeWith(conn, CloseSlowClient, "slow client")
 						return
 					}
@@ -321,7 +341,7 @@ func (s *Server) runConnection(parent context.Context, conn *websocket.Conn) {
 			if rateCappedNow {
 				rateCappedNow = false
 			}
-			if !s.enqueue(writeQueue, eventBytes(ev)) {
+			if !s.enqueue(writeQueue, s.renderer.Event(ev)) {
 				s.closeWith(conn, CloseSlowClient, "slow client")
 				return
 			}
@@ -515,25 +535,41 @@ func subscriptionMatches(sub *subscription, ev ingest.Event) bool {
 	return true
 }
 
-func statusBytes(sub *subscription, rateCapped bool, dropped uint64) []byte {
+// renderStatus is a thin wrapper that hands the subscription summary
+// (and not the unexported *subscription value) to the configured
+// renderer. Keeps the renderer interface free of internal types.
+func (s *Server) renderStatus(sub *subscription, rateCapped bool, dropped uint64) []byte {
+	summary := ""
+	subscribed := false
+	if sub != nil {
+		summary = sub.summary
+		subscribed = true
+	}
+	return s.renderer.Status(summary, subscribed, rateCapped, dropped)
+}
+
+// jsonRenderer emits the PRD §13.7 JSON wire shape. It's the default
+// when Options.Renderer is nil.
+type jsonRenderer struct{}
+
+func (jsonRenderer) Event(ev ingest.Event) []byte {
+	msg := eventMessage{Type: "event", Event: eventToPayload(ev)}
+	data, _ := json.Marshal(msg)
+	return data
+}
+
+func (jsonRenderer) Status(filterSummary string, subscribed, rateCapped bool, dropped uint64) []byte {
 	msg := statusMessage{
 		Type:          "status",
-		Subscribed:    sub != nil,
+		Subscribed:    subscribed,
 		RateCapped:    rateCapped,
 		EventsDropped: dropped,
-	}
-	if sub != nil {
-		msg.FilterSummary = sub.summary
+		FilterSummary: filterSummary,
 	}
 	data, _ := json.Marshal(msg)
 	return data
 }
 
-func eventBytes(ev ingest.Event) []byte {
-	msg := eventMessage{Type: "event", Event: eventToPayload(ev)}
-	data, _ := json.Marshal(msg)
-	return data
-}
 
 var errSlowClient = errors.New("slow client write timeout")
 

@@ -1,0 +1,22 @@
+{{define "fragments/result_row.html" -}}
+<li class="result-row" x-data="{ open: false }">
+  <button type="button" class="row-toggle" x-on:click="open = !open" :aria-expanded="open">
+    <span class="caret" x-show="!open">{{icon "chevron-right"}}</span>
+    <span class="caret" x-show="open">{{icon "chevron-down"}}</span>
+    <time class="ts" data-ts="{{.TimestampISO}}">{{.TimestampDisplay}}</time>
+    {{if .HasLevel}}<span class="{{.LevelClass}}">{{.LevelLabel}}</span>{{end}}
+    {{if .HasService}}<span class="svc">{{.Service}}</span>{{end}}
+    {{if .HasHost}}<span class="host muted">{{.Host}}</span>{{end}}
+    <span class="msg">{{if .HasMessage}}{{.MessagePreview}}{{end}}</span>
+  </button>
+  <div class="row-detail" x-show="open" x-cloak>
+    {{if .HasMessage}}<p class="row-message">{{.Message}}</p>{{end}}
+    <dl class="attrs">
+      <dt>source</dt><dd>{{.Source}}</dd>
+      {{if .HasHost}}<dt>host</dt><dd>{{.Host}}</dd>{{end}}
+      {{range $k, $v := .Attributes}}<dt>{{$k}}</dt><dd>{{$v}}</dd>{{end}}
+    </dl>
+    {{if .Raw}}<details class="raw"><summary>raw</summary><pre>{{.Raw}}</pre></details>{{end}}
+  </div>
+</li>
+{{- end}}

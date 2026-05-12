@@ -137,6 +137,12 @@ func New(opts Options) *Server {
 // an http.Server.
 func (s *Server) Handler() http.Handler { return s.router }
 
+// Router exposes the underlying chi router so external packages (the
+// UI server, primarily) can register additional routes onto the same
+// tree. Keeps /api/* and /ui/* sharing one mux without forcing the api
+// package to import the ui package.
+func (s *Server) Router() chi.Router { return s.router }
+
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }

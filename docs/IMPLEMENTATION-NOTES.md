@@ -581,3 +581,83 @@ DuckDB-side `LIKE` escape semantics — it just uses `strings.Contains`
 and `strings.HasPrefix`. For ASCII content the two are equivalent;
 for content that depends on collation we'd need to revisit, but
 PRD §7.3.4 only specifies case-insensitive substring.
+
+## Phase 12 — Web UI
+
+### Frontend dependencies are vendored on demand, not committed
+
+- **Plan text (Phase 12, task 1).** "Static `static/` directory contains
+  ... HTMX, Alpine, Open Props ... vendored from a release tag."
+- **What ships.** `scripts/vendor.sh` fetches the pinned versions of
+  htmx, htmx-ext-ws, Alpine.js, and Open Props CSS into
+  `static/vendor/` on demand. The Dockerfile invokes the same script
+  during image build; operators (and CI) run it once locally.
+
+Reasons for keeping the minified blobs out of git:
+- The four files weigh ~55KB minified but balloon the diff noise on
+  every dependency bump.
+- The single `scripts/vendor.sh` is the canonical source of pin info
+  (the `VERSIONS` file is regenerated on each run), avoiding two
+  parallel "which version is current" sources.
+- Local dev and Dockerfile share one workflow.
+
+The `//go:embed all:static` directive accepts the empty `vendor/`
+directory (the `.gitkeep` and `README.md` already inside it satisfy the
+non-empty requirement). The browser sees 404s for the vendor URLs until
+`scripts/vendor.sh` is run.
+
+### Live tail uses a parallel `/ui/query/stream` WebSocket
+
+- **Plan text (Phase 12, task 9).** "HTMX WebSocket extension on the
+  result list element."
+- **What ships.** `internal/ws.Server` now accepts a `Renderer`
+  interface in `Options`. The JSON renderer (default, matching PRD
+  §13.7) stays on `/api/query/stream`; a second `ws.Server` instance
+  with an HTML renderer is mounted at `/ui/query/stream` and emits
+  `hx-swap-oob="afterbegin:#tail-events"` fragments.
+
+The PRD has a soft contradiction here: §13.7 specifies JSON on
+`/api/query/stream`, while §11.2 describes the live tail as receiving
+server-rendered HTML. Two routes resolves it cleanly: programmatic
+clients keep the documented JSON shape, the browser gets HTML
+fragments. The pair shares one fan-out, one filter compiler, and the
+same close-code semantics — only the byte rendering differs.
+
+The HTML renderer's `Status()` returns `nil`, which the existing
+`enqueue` path treats as "skip this frame". Live tail liveness in the
+browser is conveyed by WebSocket open/close — there is no place in the
+HTML view to put status frames.
+
+### Browser end-to-end tests deferred to Phase 16
+
+- **Plan text (Phase 12, task 10).** "End-to-end browser test (using
+  `playwright` or `chromedp`)."
+- **What ships.** Template snapshot tests and HTTP-handler tests in
+  `internal/ui/*_test.go` cover render correctness; the live browser
+  pass moves to Phase 16's hardening + UX validation.
+
+Reasoning: Playwright/chromedp pulls a browser binary into CI, which
+the Phase-15 image work hasn't yet rationalised. Phase 16's UX usability
+test already involves browser-driven validation against a populated
+dataset, so combining both keeps the browser dependency in one place.
+The template-render tests assert each HTMX hook (`hx-post`,
+`hx-swap-oob`, `hx-trigger`) and oob-swap target appears in the markup,
+so the contract between server and HTMX is verified without the
+browser.
+
+### Admin view is a read-only stub; full controls land in Phase 13
+
+The admin template renders the retention summary, archive backend
+summary, and the facet list, but no buttons drive backend mutations.
+Phase 13's plan is explicit that "all buttons trigger the right
+backend operations" is its DoD; this phase delivers just the read
+surface and the navigation entry point.
+
+### Theme controller uses native `[data-theme]` attribute switching
+
+§12.3 specifies the three-layer CSS (`:root`, `@media`, `[data-theme]`)
+exactly as implemented. The Alpine controller cycles
+`auto → light → dark` and only sets `data-theme` for the manual modes;
+"auto" deletes the attribute so the media query takes effect. This
+matches the PRD's "Auto mode is the absence of `data-theme`"
+literally.

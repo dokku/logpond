@@ -1,0 +1,31 @@
+{{define "fragments/result_list.html" -}}
+{{with .Sidebar}}
+<div hx-swap-oob="innerHTML:#facets">
+  {{range .}}
+  {{template "fragments/facet.html" .}}
+  {{end}}
+</div>
+{{end}}
+
+<header class="result-header">
+  <span>{{formatCount .Stats.RowsReturned}} matches in {{.Stats.DurationMs}}ms · {{.Stats.SegmentsRead}} segments · {{formatCount .Stats.RowsScanned}} rows scanned</span>
+</header>
+
+{{if .Events}}
+<ul class="result-rows">
+  {{range .Events}}{{template "fragments/result_row.html" .}}{{end}}
+</ul>
+
+{{if .NextCursor}}
+<div class="load-more-wrap">
+  <button type="button" class="btn"
+    hx-get="/ui/load-more?cursor={{.NextCursor}}&request={{.RequestB64}}"
+    hx-target="this"
+    hx-swap="outerHTML">Load more</button>
+</div>
+{{end}}
+
+{{else}}
+<p class="empty-state">No events match. <span class="muted">Try a wider time range or remove a filter.</span></p>
+{{end}}
+{{- end}}

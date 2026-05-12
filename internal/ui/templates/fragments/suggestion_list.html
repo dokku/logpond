@@ -1,0 +1,17 @@
+{{define "fragments/suggestion_list.html" -}}
+{{if .Items}}
+<ul class="suggestion-list" role="listbox">
+  {{range $i, $s := .Items}}
+  <li class="suggestion" role="option" data-text="{{.Text}}" data-kind="{{.Kind}}"
+    :class="{ 'active': activeIndex === {{$i}} }"
+    x-on:click="select('{{.Text}}', '{{.Kind}}')"
+    x-on:mouseover="activeIndex = {{$i}}">
+    <span class="suggestion-text">{{.Text}}</span>
+    <span class="suggestion-kind muted">{{.Kind}}</span>
+    {{if .Description}}<span class="suggestion-desc muted">{{.Description}}</span>{{end}}
+    {{if .HasCount}}<span class="suggestion-count muted">{{formatCount .Count}}</span>{{end}}
+  </li>
+  {{end}}
+</ul>
+{{end}}
+{{- end}}

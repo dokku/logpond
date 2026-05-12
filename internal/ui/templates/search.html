@@ -1,0 +1,79 @@
+{{define "search.html" -}}
+<!doctype html>
+<html lang="en" x-data="themeController()" x-init="apply()" :data-theme="theme === 'auto' ? null : theme">
+{{template "fragments/head.html" .}}
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+  {{template "fragments/topbar.html" .}}
+  <main id="main" class="view view-search">
+    {{with .Page}}
+    <div class="search" x-data="searchView()">
+      <form class="search-form" hx-post="/ui/query" hx-target="#results" hx-swap="innerHTML" hx-include="this">
+        <div class="row time-row">
+          <label>
+            <span class="muted">Time range</span>
+            <select name="time_preset" x-model="timePreset">
+              <option value="15m">Last 15 minutes</option>
+              <option value="1h" selected>Last 1 hour</option>
+              <option value="6h">Last 6 hours</option>
+              <option value="24h">Last 24 hours</option>
+              <option value="7d">Last 7 days</option>
+              <option value="custom">Custom</option>
+            </select>
+          </label>
+          <label x-show="timePreset === 'custom'">
+            <span class="muted">From</span>
+            <input type="datetime-local" name="from" x-model="customFrom">
+          </label>
+          <label x-show="timePreset === 'custom'">
+            <span class="muted">To</span>
+            <input type="datetime-local" name="to" x-model="customTo">
+          </label>
+        </div>
+
+        <div class="row search-bar-row">
+          <div class="search-bar" x-data="searchBar()">
+            <span class="search-bar-icon" aria-hidden="true">{{icon "search"}}</span>
+            <input type="text" name="q" autocomplete="off" spellcheck="false"
+              placeholder="service:api level:(error OR warn) &quot;connection refused&quot;"
+              x-ref="input"
+              x-model="q"
+              x-on:keydown="onKeydown($event)"
+              x-on:focus="focused = true"
+              hx-post="/ui/search-suggest"
+              hx-trigger="keyup changed delay:50ms, focus"
+              hx-target="#suggestions"
+              hx-swap="innerHTML"
+              hx-include="closest .search-bar"
+              aria-label="Search query">
+            <input type="hidden" name="cursor_pos" :value="cursorPos()">
+            <button type="button" class="icon-btn" aria-label="Clear" x-on:click="clear()" x-show="q.length > 0">{{icon "x"}}</button>
+            <div id="suggestions" class="suggestions" x-show="focused" x-on:click.outside="focused = false"></div>
+          </div>
+        </div>
+
+        <div class="row submit-row">
+          <span id="count-indicator" class="count-indicator muted"
+            hx-post="/ui/query/count"
+            hx-trigger="keyup changed delay:300ms from:input[name='q'], load"
+            hx-include="closest form"
+            hx-swap="innerHTML"></span>
+          <div class="grow"></div>
+          <button type="submit" class="btn btn-primary">Search</button>
+        </div>
+      </form>
+
+      <div class="search-body">
+        <aside class="sidebar">
+          <div id="facets" class="facets"></div>
+        </aside>
+        <section id="results" class="results" aria-live="polite">
+          <p class="placeholder muted">Submit a search to see results.</p>
+        </section>
+      </div>
+    </div>
+    {{end}}
+  </main>
+</body>
+</html>
+{{- end}}

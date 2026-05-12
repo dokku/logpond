@@ -1,0 +1,29 @@
+{{define "fragments/topbar.html" -}}
+<header class="topbar">
+  <a class="brand" href="/">Logpond</a>
+  <nav class="nav">
+    <a href="/"{{if eq .View "search"}} class="active"{{end}}>Search</a>
+    <a href="/tail"{{if eq .View "tail"}} class="active"{{end}}>Live tail</a>
+    <a href="/admin"{{if eq .View "admin"}} class="active"{{end}}>Admin</a>
+  </nav>
+  <div class="status">
+    {{- with .Archive -}}
+    <span class="pill" title="{{.Detail}}">
+      Archive:
+      {{if eq .Kind "none"}}
+        <span class="dot dot-degraded" aria-hidden="true">●</span> none
+      {{else}}
+        <span class="dot dot-healthy" aria-hidden="true">●</span> {{.Kind}}
+      {{end}}
+    </span>
+    {{- end -}}
+  </div>
+  <div class="theme" x-data>
+    <button type="button" class="icon-btn" aria-label="Toggle theme" x-on:click="$dispatch('theme-cycle')">
+      <span x-show="$root.theme === 'light'">{{icon "sun"}}</span>
+      <span x-show="$root.theme === 'dark'">{{icon "moon"}}</span>
+      <span x-show="$root.theme === 'auto'">{{icon "monitor"}}</span>
+    </button>
+  </div>
+</header>
+{{- end}}
