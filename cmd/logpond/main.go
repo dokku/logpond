@@ -21,6 +21,7 @@ import (
 	"github.com/dokku/logpond/internal/config"
 	"github.com/dokku/logpond/internal/ingest"
 	"github.com/dokku/logpond/internal/metrics"
+	"github.com/dokku/logpond/internal/query"
 	"github.com/dokku/logpond/internal/segments"
 )
 
@@ -142,11 +143,19 @@ func run() error {
 		}
 	}, logger)
 
+	maxTimeRange, err := config.ParseDuration(cfg.Query.MaxTimeRange)
+	if err != nil {
+		return fmt.Errorf("parsing query.max_time_range: %w", err)
+	}
+	executor := query.NewExecutor(cat, mgr, logger)
+
 	srv := api.New(api.Options{
-		Logger:     logger,
-		Buffer:     buf,
-		Metrics:    m,
-		Extractors: extractors,
+		Logger:       logger,
+		Buffer:       buf,
+		Metrics:      m,
+		Extractors:   extractors,
+		Executor:     executor,
+		MaxTimeRange: maxTimeRange,
 	})
 
 	httpServer := &http.Server{

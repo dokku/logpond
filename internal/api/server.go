@@ -13,9 +13,11 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/dokku/logpond/internal/ingest"
 	"github.com/dokku/logpond/internal/metrics"
+	"github.com/dokku/logpond/internal/query"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 )
@@ -28,11 +30,13 @@ const maxDecompressedBody = 32 << 20 // 32MB
 // Server wires extractors, the ring buffer, and the metrics handles to
 // the chi router.
 type Server struct {
-	router     chi.Router
-	logger     *slog.Logger
-	buffer     *ingest.Buffer
-	metrics    *Metrics
-	extractors map[string]*ingest.Extractor
+	router       chi.Router
+	logger       *slog.Logger
+	buffer       *ingest.Buffer
+	metrics      *Metrics
+	extractors   map[string]*ingest.Extractor
+	executor     *query.Executor
+	maxTimeRange time.Duration
 }
 
 // Metrics is the subset of the central metrics struct that the API
@@ -42,13 +46,15 @@ type Metrics = metrics.Metrics
 
 // Options bundles construction parameters.
 type Options struct {
-	Logger     *slog.Logger
-	Buffer     *ingest.Buffer
-	Metrics    *Metrics
-	Extractors map[string]*ingest.Extractor
+	Logger       *slog.Logger
+	Buffer       *ingest.Buffer
+	Metrics      *Metrics
+	Extractors   map[string]*ingest.Extractor
+	Executor     *query.Executor
+	MaxTimeRange time.Duration
 }
 
-// New builds a Server with all Phase 2 routes registered.
+// New builds a Server with all currently-implemented routes registered.
 func New(opts Options) *Server {
 	if opts.Logger == nil {
 		opts.Logger = slog.Default()
@@ -58,15 +64,18 @@ func New(opts Options) *Server {
 	r.Use(middleware.Recoverer)
 
 	s := &Server{
-		router:     r,
-		logger:     opts.Logger,
-		buffer:     opts.Buffer,
-		metrics:    opts.Metrics,
-		extractors: opts.Extractors,
+		router:       r,
+		logger:       opts.Logger,
+		buffer:       opts.Buffer,
+		metrics:      opts.Metrics,
+		extractors:   opts.Extractors,
+		executor:     opts.Executor,
+		maxTimeRange: opts.MaxTimeRange,
 	}
 
 	r.Get("/healthz", s.handleHealthz)
 	r.Post("/ingest/{source_name}", s.handleIngest)
+	r.Post("/api/query", s.handleQuery)
 
 	return s
 }

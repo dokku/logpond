@@ -276,6 +276,30 @@ func (m *Manager) Close() error {
 	return firstErr
 }
 
+// QueryActive runs a SQL statement against the active segment with id.
+// Returns (rows, true, nil) on success and (nil, false, nil) if the
+// segment is not currently open as active — callers fall back to a
+// catalog-based lookup in that case (it may have just sealed).
+//
+// The manager keeps DuckDB MaxOpenConns at 4, so concurrent reader
+// queries don't deadlock the appender's held connection.
+func (m *Manager) QueryActive(ctx context.Context, id, sqlText string, args ...any) (*sql.Rows, bool, error) {
+	m.mu.Lock()
+	seg, ok := m.active[id]
+	m.mu.Unlock()
+	if !ok {
+		return nil, false, nil
+	}
+	if err := seg.conn.FlushAppender(); err != nil {
+		return nil, true, fmt.Errorf("flushing appender before query: %w", err)
+	}
+	rows, err := seg.conn.DB().QueryContext(ctx, sqlText, args...)
+	if err != nil {
+		return nil, true, fmt.Errorf("querying active segment %s: %w", id, err)
+	}
+	return rows, true, nil
+}
+
 // SealableNow returns the active segments whose window closed at least
 // sealGrace ago, oldest-first.
 func (m *Manager) SealableNow() []string {

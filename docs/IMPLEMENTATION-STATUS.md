@@ -6,7 +6,7 @@ Tracks progress against `IMPLEMENTATION-PLAN.md`.
 - [x] Phase 1 — Catalog and config
 - [x] Phase 2 — Ingest path
 - [x] Phase 3 — Segment lifecycle (active + sealing)
-- [ ] Phase 4 — Filter tree + canonical query API
+- [x] Phase 4 — Filter tree + canonical query API
 - [ ] Phase 5 — Datadog-style search parser
 - [ ] Phase 6 — Facets and autocomplete
 - [ ] Phase 7 — Retention

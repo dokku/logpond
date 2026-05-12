@@ -253,6 +253,34 @@ func (c *Catalog) DeleteSegment(ctx context.Context, id string) error {
 	return err
 }
 
+// SegmentsInRange returns segments whose [time_start, time_end]
+// overlaps [from, to], ordered by time_start descending so callers
+// can scan newest-first. Lost segments are excluded — their files are
+// gone and no longer queryable.
+func (c *Catalog) SegmentsInRange(ctx context.Context, from, to time.Time) ([]Segment, error) {
+	rows, err := c.db.QueryContext(ctx, `
+        SELECT `+segmentColumns+` FROM segments
+        WHERE state != ?
+          AND time_start <= ?
+          AND time_end   >= ?
+        ORDER BY time_start DESC`,
+		StateLost, to.UTC(), from.UTC(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("listing segments in range: %w", err)
+	}
+	defer rows.Close()
+	var out []Segment
+	for rows.Next() {
+		s, err := scanSegment(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, s)
+	}
+	return out, rows.Err()
+}
+
 // ListSegmentsByState returns segments in the given state ordered by
 // time_start ascending so callers process them oldest-first.
 func (c *Catalog) ListSegmentsByState(ctx context.Context, state string) ([]Segment, error) {

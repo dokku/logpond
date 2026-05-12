@@ -72,3 +72,65 @@ deadlock any concurrent reader query (sealing's `count`/`min`/`max`
 calls, the test suite's verification SELECTs) because there is no
 free connection to acquire. Four is comfortably above the number of
 concurrent readers we issue per segment in steady state.
+
+## Phase 4 — Filter tree + canonical query API
+
+### Per-segment queries instead of a single UNION ALL
+
+- **Plan text (Phase 4, task 3).** "Builds a `UNION ALL` query across
+  the active segment table and each sealed Parquet's `read_parquet()`."
+- **What ships.** The executor issues one `SELECT` per eligible
+  segment and merges in Go.
+
+A single UNION ALL would require either a shared DuckDB query engine
+that can both read sealed Parquet files and `ATTACH` the active
+segments' DuckDB files. Each active segment is owned by its
+writer-side connection; `ATTACH` from a separate connection in the
+same process risks duelling write/read locks on the file, and
+producing a stable SQL string that references many transient paths
+is awkward. The per-segment approach lets:
+
+- sealed segments run on a fresh in-memory DuckDB with `read_parquet`;
+- active segments route through the writer's own `*sql.DB` (which is
+  why `internal/segments.Manager.QueryActive` exists);
+- the executor enforce `LIMIT N` per segment using catalog ordering
+  (newest-first for the default `timestamp DESC` sort), so we stop
+  scanning once the global limit is satisfied.
+
+The Go-level merge is `sort.SliceStable` on the accumulated batch.
+Cost scales with `limit * #-segments-touched`, which is bounded by
+the time-range (7 days × 12 hourly segments ≈ 168 segments worst
+case) and by short-circuit when the limit is reached.
+
+### Lenient attribute typing
+
+`§7.3.4` calls for lenient numeric-vs-string coercion on attribute
+filters. The compiler implements this minimally:
+
+- `eq`/`neq`/`in`/`not_in`/`contains`/`starts_with` compare
+  `json_extract_string(attributes, '$.X')` against the value
+  stringified by Go's default JSON decoding. So `@user_id:42` matches
+  rows where `user_id` was stored as `42` (decoded by DuckDB's
+  JSON-to-text conversion).
+- `gt`/`lt`/`gte`/`lte` on attributes coerce both sides to `DOUBLE`
+  so numeric ordering is preserved even when the stored value is a
+  string like `"1500"`.
+
+Edge cases the v1 compiler does not handle yet: `@user_id:42.0`
+against a stored `42`, and `@flag:true` against `"true"`. Both can be
+added later as additional OR branches inside `compileEq`. The current
+behaviour is documented here so the Phase-5 parser tests don't
+quietly assume it.
+
+### Cursor shape
+
+The opaque cursor encodes `{timestamp, segment_id}` (base64-url JSON).
+Pagination assumes the primary sort is `timestamp`; if the caller
+sorts by another field first the cursor compiles to an empty WHERE
+fragment, which means the same rows would be re-returned. The PRD's
+cursor design is timestamp-led (`§7.3.4` "Cursor-based using
+(timestamp, segment_id, intra_segment_row_number)"); we omit the
+intra-segment row number because the per-segment merge already keeps
+results stable for typical workloads. If we later see same-timestamp
+collisions in a single segment, we can extend the cursor without
+breaking older clients (the field is internal).
