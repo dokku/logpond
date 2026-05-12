@@ -1,0 +1,21 @@
+# Implementation Status
+
+Tracks progress against `IMPLEMENTATION-PLAN.md`.
+
+- [x] Phase 0 — Project bootstrap
+- [ ] Phase 1 — Catalog and config
+- [ ] Phase 2 — Ingest path
+- [ ] Phase 3 — Segment lifecycle (active + sealing)
+- [ ] Phase 4 — Filter tree + canonical query API
+- [ ] Phase 5 — Datadog-style search parser
+- [ ] Phase 6 — Facets and autocomplete
+- [ ] Phase 7 — Retention
+- [ ] Phase 8 — Archive backend interface + S3 implementation
+- [ ] Phase 9 — Script archive backend
+- [ ] Phase 10 — Rehydration and sideload
+- [ ] Phase 11 — Live tail (WebSocket)
+- [ ] Phase 12 — Web UI (HTMX + Alpine + Open Props)
+- [ ] Phase 13 — Admin UI (facets, segments, archive controls)
+- [ ] Phase 14 — Metrics, health, observability
+- [ ] Phase 15 — Container image and Dokku deployment
+- [ ] Phase 16 — Soak test and hardening
