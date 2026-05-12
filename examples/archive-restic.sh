@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # archive-restic.sh — reference Logpond script-archive backend.
 #
-# Implements the contract documented in docs/PRD.md §7.9.3:
+# Implements the contract documented in docs/archival.md
+# (full spec in docs/internals/PRD.md §7.9.3):
 #
 #   archive  --segment-id <id> --parquet-path <p> --manifest-path <m>
 #   verify   --segment-id <id> | --all

@@ -20,7 +20,7 @@ First release candidate. The 16-phase implementation plan has landed in tree; th
 - `cmd/loadgen` — sustained + burst NDJSON load generator.
 - `cmd/querybench` — representative-query latency suite tied to PRD §8.1.
 - `scripts/verify-parquet.sh` — cross-tool Parquet read verification.
-- `docs/SOAK-TEST.md`, `docs/TROUBLESHOOTING.md`, `docs/FAQ.md` — operator-facing docs.
+- `docs/soak-test.md`, `docs/troubleshooting.md`, and the topic guides under `docs/` - operator-facing docs.
 
 ### Security hardening (Phase 16 task 7)
 
@@ -39,4 +39,4 @@ These items remain operator responsibilities per Phase 16's plan and gate the v1
 4. UI usability pass with someone unfamiliar with the project (§19 criterion 7).
 5. Under-30-minutes new-user-on-Dokku setup pass (§19 criterion 6).
 
-When all five complete, flip `Phase 16` in `docs/IMPLEMENTATION-STATUS.md` and cut the `v1.0.0` tag.
+When all five complete, flip `Phase 16` in `docs/internals/IMPLEMENTATION-STATUS.md` and cut the `v1.0.0` tag.

@@ -1,27 +1,30 @@
 # Logpond
 
-A small, single-container log search service for Dokku hosts. Ingests JSON logs over HTTP, keeps recent logs hot for fast search and faceted browsing, archives aged segments to S3 or via a user-provided script, and lets operators rehydrate archives back into the same UI.
+A single-container log search service for Dokku hosts. Ingests JSON logs over HTTP, keeps recent logs hot for fast search and faceted browsing, and archives aged segments to S3 (or any destination you can script).
 
-- **Spec:** [`docs/PRD.md`](docs/PRD.md)
-- **Deploy on Dokku:** [`docs/DEPLOY-DOKKU.md`](docs/DEPLOY-DOKKU.md)
-- **Troubleshooting:** [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md)
-- **FAQ:** [`docs/FAQ.md`](docs/FAQ.md)
-- **Soak test playbook:** [`docs/SOAK-TEST.md`](docs/SOAK-TEST.md)
-- **Release notes:** [`RELEASE-NOTES.md`](RELEASE-NOTES.md)
-- **Progress:** [`docs/IMPLEMENTATION-STATUS.md`](docs/IMPLEMENTATION-STATUS.md)
+## Installation
 
-## Quick start (local)
-
-Requires Go 1.26+ and Bash for the vendor script.
+Pull the multi-arch container image:
 
 ```bash
-scripts/vendor.sh            # fetch htmx, Alpine, Open Props
-go run ./cmd/logpond -config /tmp/logpond.yaml
+docker pull ghcr.io/dokku/logpond:latest
 ```
 
-A minimal `/tmp/logpond.yaml`:
+Or deploy on Dokku in one step:
 
-```yaml
+```bash
+dokku git:from-image logpond ghcr.io/dokku/logpond:latest
+```
+
+Pin a specific tag in production (`ghcr.io/dokku/logpond:v1.0.0` once cut) so an upstream release does not change behavior under you. The full Dokku walk-through (storage mount, env vars, Vector sink, feedback-loop avoidance) is in [`docs/dokku-deployment.md`](docs/dokku-deployment.md).
+
+## Usage
+
+Run Logpond locally with a minimal config:
+
+```bash
+mkdir -p /tmp/logpond-data
+cat >/tmp/logpond.yaml <<'EOF'
 data_dir: /tmp/logpond-data
 sources:
   - name: default
@@ -31,9 +34,16 @@ sources:
       message: [message]
       service: [service]
       host: [host]
+EOF
+
+docker run --rm -p 8080:8080 \
+  -e LOGPOND_CONFIG=/etc/logpond/config.yaml \
+  -v /tmp/logpond.yaml:/etc/logpond/config.yaml:ro \
+  -v /tmp/logpond-data:/data \
+  ghcr.io/dokku/logpond:latest
 ```
 
-Send a few events:
+Send a log event with `curl`:
 
 ```bash
 curl -X POST http://localhost:8080/ingest/default \
@@ -41,20 +51,12 @@ curl -X POST http://localhost:8080/ingest/default \
   --data-binary $'{"timestamp":"2026-05-12T10:00:00Z","service":"api","level":"info","message":"hello"}\n'
 ```
 
-Open <http://localhost:8080/> in a browser to search, browse facets, and live-tail.
+Open <http://localhost:8080/> to search, browse facets, and live-tail.
 
-## Operator tooling
+## Documentation
 
-Phase 16 ships three helpers for hardening a Logpond deployment:
+Full documentation lives in [`docs/`](docs/). Start with [Getting Started](docs/getting-started.md).
 
-| Tool                          | Purpose                                                                      |
-| ----------------------------- | ---------------------------------------------------------------------------- |
-| `go run ./cmd/loadgen`        | Sustained + burst NDJSON load generator. PRD §8.1 targets.                   |
-| `go run ./cmd/querybench`     | Representative-query latency suite. Verifies §8.1 query targets.             |
-| `scripts/verify-parquet.sh`   | Reads a sealed Parquet via DuckDB, pyarrow, and pandas to verify §8.5.       |
+## License
 
-See [`docs/SOAK-TEST.md`](docs/SOAK-TEST.md) for a 7-day soak runbook.
-
-## Integration tests
-
-`make setup test` brings up Dokku, a local Docker registry, and MinIO via `docker compose`, builds the Logpond image, deploys it, and runs the bats suite under `tests/`. Use `make setup-native test-native` if Dokku is installed on the host.
+[MIT](LICENSE)

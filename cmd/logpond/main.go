@@ -713,7 +713,7 @@ func walkDiff(a, b reflect.Value, prefix string, out *[]string) {
 
 // ringBufferEventCap converts the configured ring-buffer memory limit
 // to an event count using a 1KB-per-event heuristic. See
-// docs/IMPLEMENTATION-NOTES.md for the rationale.
+// docs/internals/IMPLEMENTATION-NOTES.md for the rationale.
 func ringBufferEventCap(memoryLimit string) (int, error) {
 	bytes, err := config.ParseSize(memoryLimit)
 	if err != nil {
