@@ -50,6 +50,8 @@ type Server struct {
 	facetSampleSize int
 	dataDir         string
 	rehydrationTTL  time.Duration
+	fanout          *ingest.Fanout
+	liveTail        http.Handler
 }
 
 // Metrics is the subset of the central metrics struct that the API
@@ -73,6 +75,8 @@ type Options struct {
 	FacetSampleSize int
 	DataDir         string
 	RehydrationTTL  time.Duration
+	Fanout          *ingest.Fanout
+	LiveTail        http.Handler
 }
 
 // New builds a Server with all currently-implemented routes registered.
@@ -100,6 +104,8 @@ func New(opts Options) *Server {
 		facetSampleSize: opts.FacetSampleSize,
 		dataDir:         opts.DataDir,
 		rehydrationTTL:  opts.RehydrationTTL,
+		fanout:          opts.Fanout,
+		liveTail:        opts.LiveTail,
 	}
 
 	r.Get("/healthz", s.handleHealthz)
@@ -120,6 +126,9 @@ func New(opts Options) *Server {
 	r.Delete("/api/rehydrated/{id}", s.handleDeleteRehydrated)
 	r.Post("/api/import", s.handleImport)
 	r.Get("/api/jobs/{id}", s.handleGetJob)
+	if s.liveTail != nil {
+		r.Get("/api/query/stream", s.liveTail.ServeHTTP)
+	}
 
 	return s
 }

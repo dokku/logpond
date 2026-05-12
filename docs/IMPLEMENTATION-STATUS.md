@@ -13,7 +13,7 @@ Tracks progress against `IMPLEMENTATION-PLAN.md`.
 - [x] Phase 8 — Archive backend interface + S3 implementation
 - [x] Phase 9 — Script archive backend
 - [x] Phase 10 — Rehydration and sideload
-- [ ] Phase 11 — Live tail (WebSocket)
+- [x] Phase 11 — Live tail (WebSocket)
 - [ ] Phase 12 — Web UI (HTMX + Alpine + Open Props)
 - [ ] Phase 13 — Admin UI (facets, segments, archive controls)
 - [ ] Phase 14 — Metrics, health, observability

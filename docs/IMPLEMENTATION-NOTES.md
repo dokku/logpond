@@ -495,3 +495,89 @@ uses the same predicate the executor does for query scoping.
 does not pin the formula. 50 MB/s is a conservative lower bound for
 warm S3 + local disk; the response is informational and the real
 job always wins or loses against it on its own merits.
+
+## Phase 11 — Live tail (WebSocket)
+
+### WebSocket library: `github.com/coder/websocket`
+
+- **Plan text (Phase 11, task 1).** "Upgrade `GET /api/query/stream`
+  via `nhooyr.io/websocket`."
+- **What ships.** The handler uses `github.com/coder/websocket`, which
+  is the current canonical location of the library originally at
+  `nhooyr.io/websocket` (Anmol Sethi handed maintenance to Coder in
+  2024). The API surface is identical; the import path is the only
+  change. Locking in the maintained module avoids depending on a
+  redirect that may eventually be removed.
+
+### Fan-out publishes on the flush callback, not from `Buffer.Append`
+
+- **Plan text (Phase 11, task 2).** "The ring buffer's flush path
+  emits events to a fan-out channel."
+- **What ships.** The flush callback in `cmd/logpond/main.go`
+  publishes each drained batch to `*ingest.Fanout` after handing it to
+  `mgr.Flush`. Subscribers see events at the same cadence as the
+  segment writer (driven by `Flusher`'s interval/half-full signal),
+  which keeps a single source of truth for "an event has been
+  accepted by Logpond."
+
+The alternative — broadcasting from `Buffer.Append` itself — would
+have surfaced events to live tail microseconds earlier but at the
+cost of coupling the fanout to ingest's hot path. Tests would also
+have to mock out two emission points instead of one. PRD §7.6's "≤ 2s
+end-to-end" budget is comfortably met by the flush-tick (1s default).
+
+### Slow-client detection uses a writer goroutine + non-blocking enqueue
+
+- **Plan text (Phase 11, task 4).** "If the subscriber's send queue
+  stays full for 30s, close with 4003."
+- **What ships.** Each connection has a small writer goroutine that
+  drains a 16-slot `chan []byte` and calls `conn.Write` with a
+  per-message context whose deadline is `SlowClientGrace`. The main
+  select loop performs a non-blocking send into that queue and falls
+  back to a bounded wait of `SlowClientGrace`; if the wait fires the
+  loop closes 4003.
+
+This deviates from the literal "queue full for 30s" wording but
+matches the intent: when the WebSocket peer stops draining, TCP back
+pressure stalls the writer, the writer's deadline fires, and the
+main loop sees `errSlowClient` via the writer's error channel. The
+non-blocking enqueue is the second path to 4003 and exists because
+the writer goroutine may already be blocked in `conn.Write` when the
+main loop tries to enqueue a heartbeat or status update; without the
+fall-through the main loop would deadlock waiting for a writer that
+can't progress.
+
+### `OnClose` test hook surfaces server intent
+
+The WebSocket close frame may not reach the client when TCP is
+wedged — the same condition that triggers 4003 also prevents the
+close frame from going out cleanly. Tests therefore observe the
+server's close intent via an `OnClose(code)` callback configured on
+`ws.Options` rather than reading the close code off the wire. The
+hook fires for application-defined codes (4001–4004) only; clean
+1000 closures are uninteresting for tests and aren't reported.
+
+### Close-frame writes are bounded
+
+`closeWith` wraps `conn.Close` in a goroutine with a 1s ceiling
+because, again, a wedged TCP can hang the close handshake. Without
+the bound, the connection-cap path (4004) on a slow client could
+keep the listening handler busy for the duration of the kernel's
+TCP timeout. The underlying conn is still freed when `Close` returns
+internally, so the cap accounting in `clients` stays accurate.
+
+### In-memory event matcher mirrors the SQL compiler
+
+`internal/query/match.go` implements `Match(node, ingest.Event)` for
+live tail. The semantics mirror `internal/query/compile.go`'s SQL
+output: lenient JSON-to-text coercion on attribute equality,
+numeric-typed comparisons via `CAST(... AS DOUBLE)` analogues, and
+case-insensitive defaults for string ops. Keeping the two in step is
+important because the same `q` should match the same rows in live
+tail and in a `/api/query` request.
+
+A minor divergence from compile.go: the matcher does not consult the
+DuckDB-side `LIKE` escape semantics — it just uses `strings.Contains`
+and `strings.HasPrefix`. For ASCII content the two are equivalent;
+for content that depends on collation we'd need to revisit, but
+PRD §7.3.4 only specifies case-insensitive substring.

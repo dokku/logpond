@@ -31,6 +31,7 @@ import (
 	"github.com/dokku/logpond/internal/query"
 	"github.com/dokku/logpond/internal/retention"
 	"github.com/dokku/logpond/internal/segments"
+	"github.com/dokku/logpond/internal/ws"
 )
 
 var version = "0.0.0-dev"
@@ -145,11 +146,14 @@ func run() error {
 		"lost_marked", len(rec.LostMarked),
 	)
 
+	fanout := ingest.NewFanout()
 	flusher := ingest.NewFlusher(buf, time.Second, bufCap, func(ctx context.Context, batch []ingest.Event) {
 		if err := mgr.Flush(ctx, batch); err != nil {
 			logger.Error("flushing batch to segment", "count", len(batch), "err", err)
 		}
+		fanout.Publish(batch)
 	}, logger)
+	liveTail := ws.New(ws.Options{Fanout: fanout, Logger: logger})
 
 	maxTimeRange, err := config.ParseDuration(cfg.Query.MaxTimeRange)
 	if err != nil {
@@ -200,6 +204,8 @@ func run() error {
 		FacetSampleSize: cfg.Facets.SegmentSampleSize,
 		DataDir:         cfg.DataDir,
 		RehydrationTTL:  rehydrationTTL,
+		Fanout:          fanout,
+		LiveTail:        http.HandlerFunc(liveTail.Handle),
 	})
 
 	importWatcher := api.NewImportWatcher(api.ImportWatcherOptions{
