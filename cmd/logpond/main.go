@@ -180,6 +180,11 @@ func run() error {
 		return fmt.Errorf("configuring jobs manager: %w", err)
 	}
 
+	rehydrationTTL := time.Duration(cfg.Rehydration.TTLDays) * 24 * time.Hour
+	if rehydrationTTL <= 0 {
+		rehydrationTTL = 7 * 24 * time.Hour
+	}
+
 	srv := api.New(api.Options{
 		Logger:          logger,
 		Buffer:          buf,
@@ -193,6 +198,20 @@ func run() error {
 		Jobs:            jobManager,
 		MaxTimeRange:    maxTimeRange,
 		FacetSampleSize: cfg.Facets.SegmentSampleSize,
+		DataDir:         cfg.DataDir,
+		RehydrationTTL:  rehydrationTTL,
+	})
+
+	importWatcher := api.NewImportWatcher(api.ImportWatcherOptions{
+		DataDir: cfg.DataDir,
+		Catalog: cat,
+		TTL:     rehydrationTTL,
+		Logger:  logger,
+	})
+	evictor := api.NewEvictor(api.EvictorOptions{
+		Catalog:  cat,
+		Executor: executor,
+		Logger:   logger,
 	})
 
 	httpServer := &http.Server{
@@ -224,6 +243,18 @@ func run() error {
 	go func() {
 		defer wg.Done()
 		jobManager.RunGCLoop(ctx, 0)
+	}()
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		importWatcher.Run(ctx, 30*time.Second)
+	}()
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		evictor.Run(ctx, 5*time.Minute)
 	}()
 
 	wg.Add(1)

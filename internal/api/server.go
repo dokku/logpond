@@ -48,6 +48,8 @@ type Server struct {
 	jobs            *jobs.Manager
 	maxTimeRange    time.Duration
 	facetSampleSize int
+	dataDir         string
+	rehydrationTTL  time.Duration
 }
 
 // Metrics is the subset of the central metrics struct that the API
@@ -69,6 +71,8 @@ type Options struct {
 	Jobs            *jobs.Manager
 	MaxTimeRange    time.Duration
 	FacetSampleSize int
+	DataDir         string
+	RehydrationTTL  time.Duration
 }
 
 // New builds a Server with all currently-implemented routes registered.
@@ -94,6 +98,8 @@ func New(opts Options) *Server {
 		jobs:            opts.Jobs,
 		maxTimeRange:    opts.MaxTimeRange,
 		facetSampleSize: opts.FacetSampleSize,
+		dataDir:         opts.DataDir,
+		rehydrationTTL:  opts.RehydrationTTL,
 	}
 
 	r.Get("/healthz", s.handleHealthz)
@@ -110,6 +116,9 @@ func New(opts Options) *Server {
 	r.Post("/api/archive", s.handleArchive)
 	r.Post("/api/admin/archive/verify", s.handleArchiveVerify)
 	r.Get("/api/admin/archive/capabilities", s.handleArchiveCapabilities)
+	r.Post("/api/rehydrate", s.handleRehydrate)
+	r.Delete("/api/rehydrated/{id}", s.handleDeleteRehydrated)
+	r.Post("/api/import", s.handleImport)
 	r.Get("/api/jobs/{id}", s.handleGetJob)
 
 	return s

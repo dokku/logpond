@@ -444,3 +444,54 @@ modes plus `--probe`). It tags each restic snapshot with
 and retrieve can locate the snapshot id without persisting state on the
 Logpond side beyond `archive_ref`. Smoke-tested with `--probe` for all
 three modes plus an unknown mode (returns 64).
+
+## Phase 10 — Rehydration & sideload
+
+### Already-local rehydrate accepts `state=rehydrated` candidates
+
+PRD §7.10: "Already-local rehydrate. No-op + TTL bump." The PRD does
+not explicitly say which catalog states qualify, so the selector in
+`internal/api/rehydrate.go` accepts rows whose `state` is
+`archived`/`sealed` *with* an archive ref, plus any `rehydrated` row
+that already has a `local_path`. The latter is the no-op-+-bump case;
+the job just updates `evict_after` (clearing it when `persistent`).
+Without that branch, requesting a window that overlaps only
+already-local segments would return 404 — clearly not the intent.
+
+### Busy-segment refcount lives on the query executor
+
+PRD §13.11 returns 409 `segment_busy` when a delete races a query.
+We implement that by adding a small `sync.Mutex`+map refcount to
+`*query.Executor` and acquiring around every per-segment scan
+(`querySegment`, `countSegment`, `queryFacetSegment`). The DELETE
+handler and the eviction loop both consult `Executor.IsSegmentBusy`.
+A tiny `AcquireForTest` export keeps the test surface focused.
+
+### Rehydrated files live alongside one manifest
+
+The S3 backend retrieves the parquet and manifest into the
+rehydrated dir; eviction removes both (best-effort `os.Remove`).
+Manifests are useful for sideload provenance, and the watched-import
+failure path expects both files to be present.
+
+### Watcher Sweep runs once on start, then on tick
+
+`ImportWatcher.Run` does an immediate sweep before the first tick so
+an operator who drops a triplet right after a restart does not wait
+30s for pickup. This matches the natural reading of §7.10 ("polled
+every 30s") more than a tick-only loop would.
+
+### `SegmentsOverlapping` re-exports `SegmentsInRange`
+
+The import handler reuses `Catalog.SegmentsInRange` under a wrapper
+name (`SegmentsOverlapping`) so the call site reads idiomatically.
+Keeping a single SQL definition guarantees the import overlap report
+uses the same predicate the executor does for query scoping.
+
+### Estimated rehydrate duration is a coarse heuristic
+
+`POST /api/rehydrate` returns `estimated_seconds` derived from
+`total_bytes / 50 MB/s`. The PRD example surfaces an estimate but
+does not pin the formula. 50 MB/s is a conservative lower bound for
+warm S3 + local disk; the response is informational and the real
+job always wins or loses against it on its own merits.

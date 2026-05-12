@@ -659,6 +659,157 @@ func (c *Catalog) MarkSegmentArchived(ctx context.Context, id string, u ArchiveU
 	return nil
 }
 
+// RehydrateUpdate captures the catalog fields populated when an archived
+// segment is fetched back to the local rehydrated directory.
+type RehydrateUpdate struct {
+	LocalPath      string
+	RowCount       int64
+	SizeBytes      int64
+	SizeCompressed int64
+	ParquetSHA256  string
+	SourceNames    string     // JSON-encoded array per §10.2
+	EvictAfter     *time.Time // nil = persistent (never auto-evict)
+}
+
+// MarkSegmentRehydrated records the local file location and (optional)
+// eviction timestamp for a segment fetched from archive. Sets state to
+// rehydrated and updates rehydrated_at. Optional fields are only
+// rewritten when non-zero.
+func (c *Catalog) MarkSegmentRehydrated(ctx context.Context, id string, u RehydrateUpdate) error {
+	now := time.Now().UTC()
+	setParts := []string{"state = ?", "rehydrated_at = ?", "local_path = ?", "evict_after = ?"}
+	args := []any{StateRehydrated, now,
+		sql.NullString{String: u.LocalPath, Valid: u.LocalPath != ""},
+		sql.NullTime{Time: derefTime(u.EvictAfter), Valid: u.EvictAfter != nil},
+	}
+	if u.RowCount > 0 {
+		setParts = append(setParts, "row_count = ?")
+		args = append(args, u.RowCount)
+	}
+	if u.SizeBytes > 0 {
+		setParts = append(setParts, "size_bytes = ?")
+		args = append(args, u.SizeBytes)
+	}
+	if u.SizeCompressed > 0 {
+		setParts = append(setParts, "size_compressed = ?")
+		args = append(args, sql.NullInt64{Int64: u.SizeCompressed, Valid: true})
+	}
+	if u.ParquetSHA256 != "" {
+		setParts = append(setParts, "parquet_sha256 = ?")
+		args = append(args, sql.NullString{String: u.ParquetSHA256, Valid: true})
+	}
+	if u.SourceNames != "" {
+		setParts = append(setParts, "source_names = ?")
+		args = append(args, sql.NullString{String: u.SourceNames, Valid: true})
+	}
+	args = append(args, id)
+	res, err := c.db.ExecContext(ctx,
+		`UPDATE segments SET `+strings.Join(setParts, ", ")+` WHERE id = ?`, args...)
+	if err != nil {
+		return fmt.Errorf("marking segment %s rehydrated: %w", id, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return fmt.Errorf("segment %s not found", id)
+	}
+	return nil
+}
+
+// SetEvictAfter updates only the evict_after column for a segment.
+// Used when a rehydrate request matches a segment that's already local
+// and only needs its TTL bumped.
+func (c *Catalog) SetEvictAfter(ctx context.Context, id string, evictAfter *time.Time) error {
+	res, err := c.db.ExecContext(ctx,
+		`UPDATE segments SET evict_after = ? WHERE id = ?`,
+		sql.NullTime{Time: derefTime(evictAfter), Valid: evictAfter != nil}, id)
+	if err != nil {
+		return fmt.Errorf("setting evict_after for %s: %w", id, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return fmt.Errorf("segment %s not found", id)
+	}
+	return nil
+}
+
+// ListRehydratedSegments returns every segment currently in the
+// rehydrated state, ordered oldest evict_after first so the eviction
+// loop can short-circuit once a still-current row is encountered. Rows
+// with evict_after=NULL (persistent) sort last.
+func (c *Catalog) ListRehydratedSegments(ctx context.Context) ([]Segment, error) {
+	rows, err := c.db.QueryContext(ctx, `
+        SELECT `+segmentColumns+` FROM segments
+        WHERE state = ?
+        ORDER BY evict_after IS NULL, evict_after ASC`, StateRehydrated)
+	if err != nil {
+		return nil, fmt.Errorf("listing rehydrated segments: %w", err)
+	}
+	defer rows.Close()
+	var out []Segment
+	for rows.Next() {
+		s, err := scanSegment(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, s)
+	}
+	return out, rows.Err()
+}
+
+// ImportedSegment captures the inputs needed to register a newly
+// sideloaded segment that has no prior catalog row.
+type ImportedSegment struct {
+	ID             string
+	TimeStart      time.Time
+	TimeEnd        time.Time
+	RowCount       int64
+	SizeBytes      int64
+	SizeCompressed int64
+	LocalPath      string
+	ParquetSHA256  string
+	ManifestSHA256 string
+	SourceNames    string // JSON-encoded
+	EvictAfter     *time.Time
+}
+
+// InsertImportedSegment writes a rehydrated-state row for a sideloaded
+// segment. Returns the inserted row.
+func (c *Catalog) InsertImportedSegment(ctx context.Context, s ImportedSegment) error {
+	now := time.Now().UTC()
+	_, err := c.db.ExecContext(ctx, `INSERT INTO segments(
+        id, state, time_start, time_end, row_count, size_bytes, size_compressed,
+        local_path, s3_url, archive_ref, manifest_sha256, parquet_sha256, source_names,
+        created_at, sealed_at, archived_at, rehydrated_at, evict_after
+    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		s.ID, StateRehydrated, s.TimeStart.UTC(), s.TimeEnd.UTC(), s.RowCount, s.SizeBytes,
+		sql.NullInt64{Int64: s.SizeCompressed, Valid: s.SizeCompressed > 0},
+		sql.NullString{String: s.LocalPath, Valid: s.LocalPath != ""},
+		sql.NullString{}, sql.NullString{},
+		sql.NullString{String: s.ManifestSHA256, Valid: s.ManifestSHA256 != ""},
+		sql.NullString{String: s.ParquetSHA256, Valid: s.ParquetSHA256 != ""},
+		sql.NullString{String: s.SourceNames, Valid: s.SourceNames != ""},
+		now, sql.NullTime{}, sql.NullTime{}, sql.NullTime{Time: now, Valid: true},
+		sql.NullTime{Time: derefTime(s.EvictAfter), Valid: s.EvictAfter != nil},
+	)
+	if err != nil {
+		return fmt.Errorf("inserting imported segment %s: %w", s.ID, err)
+	}
+	return nil
+}
+
+// SegmentsOverlapping returns all non-lost segments whose [time_start,
+// time_end] interval intersects [from, to]. Mirrors SegmentsInRange but
+// the name reads better in the sideload-overlap context.
+func (c *Catalog) SegmentsOverlapping(ctx context.Context, from, to time.Time) ([]Segment, error) {
+	return c.SegmentsInRange(ctx, from, to)
+}
+
 // ListArchivedSegments returns segments whose archive ref or s3 url is
 // populated, ordered oldest-first.
 func (c *Catalog) ListArchivedSegments(ctx context.Context) ([]Segment, error) {
@@ -704,3 +855,10 @@ func (c *Catalog) AppliedMigrations(ctx context.Context) ([]int, error) {
 // ErrMigrationOutOfOrder is returned when a migration's version is not
 // strictly greater than every applied version.
 var ErrMigrationOutOfOrder = errors.New("migration out of order")
+
+func derefTime(t *time.Time) time.Time {
+	if t == nil {
+		return time.Time{}
+	}
+	return t.UTC()
+}

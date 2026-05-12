@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/dokku/logpond/internal/catalog"
@@ -124,6 +125,9 @@ type Executor struct {
 	cat    *catalog.Catalog
 	active ActiveSegmentSource
 	logger *slog.Logger
+
+	busyMu sync.Mutex
+	busy   map[string]int
 }
 
 // NewExecutor constructs an Executor. The active source may be nil if
@@ -132,7 +136,33 @@ func NewExecutor(cat *catalog.Catalog, active ActiveSegmentSource, logger *slog.
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Executor{cat: cat, active: active, logger: logger}
+	return &Executor{cat: cat, active: active, logger: logger, busy: map[string]int{}}
+}
+
+// acquireSegment increments the in-flight query refcount for id.
+// release must be called exactly once per acquire.
+func (e *Executor) acquireSegment(id string) func() {
+	e.busyMu.Lock()
+	e.busy[id]++
+	e.busyMu.Unlock()
+	return func() {
+		e.busyMu.Lock()
+		if e.busy[id] <= 1 {
+			delete(e.busy, id)
+		} else {
+			e.busy[id]--
+		}
+		e.busyMu.Unlock()
+	}
+}
+
+// IsSegmentBusy reports whether at least one query is currently reading
+// the segment with the given id. The DELETE /api/rehydrated/:id handler
+// uses this to return 409 segment_busy per PRD §13.11.
+func (e *Executor) IsSegmentBusy(id string) bool {
+	e.busyMu.Lock()
+	defer e.busyMu.Unlock()
+	return e.busy[id] > 0
 }
 
 // Error codes returned by the executor. The HTTP handler maps these
@@ -346,6 +376,8 @@ func (e *Executor) Count(ctx context.Context, req Request, limitGuard int) (int6
 }
 
 func (e *Executor) countSegment(ctx context.Context, s catalog.Segment, where Compiled, limit int64) (int64, error) {
+	release := e.acquireSegment(s.ID)
+	defer release()
 	whereSQL := ""
 	if where.SQL != "" {
 		whereSQL = " WHERE " + where.SQL
@@ -458,6 +490,8 @@ type facetRow struct {
 }
 
 func (e *Executor) queryFacetSegment(ctx context.Context, s catalog.Segment, fieldExpr string, base Compiled) ([]facetRow, error) {
+	release := e.acquireSegment(s.ID)
+	defer release()
 	whereSQL := ""
 	if base.SQL != "" {
 		whereSQL = " WHERE " + base.SQL
@@ -564,6 +598,8 @@ func buildFacetResult(spec FacetSpec, counts map[string]int64, sampleHit int) Fa
 }
 
 func (e *Executor) querySegment(ctx context.Context, s catalog.Segment, where Compiled, orderBy string, limit int) ([]ResultEvent, int64, error) {
+	release := e.acquireSegment(s.ID)
+	defer release()
 	if s.State == catalog.StateActive {
 		if e.active == nil {
 			return nil, 0, nil
