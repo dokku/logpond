@@ -113,11 +113,23 @@ const (
 	capNo
 )
 
-// NewScriptBackend constructs a ScriptBackend. Path is required.
+// NewScriptBackend constructs a ScriptBackend. Path is required and
+// must be an absolute, normalized path (PRD §16 task 7: "no `..`
+// traversal"). Relative paths and paths containing `..` segments are
+// rejected so an operator can't unintentionally point Logpond at a file
+// outside the container's expected layout via env-overlay.
 func NewScriptBackend(opts ScriptOptions) (*ScriptBackend, error) {
-	if strings.TrimSpace(opts.Path) == "" {
+	path := strings.TrimSpace(opts.Path)
+	if path == "" {
 		return nil, errors.New("script backend: Path is required")
 	}
+	if !filepath.IsAbs(path) {
+		return nil, fmt.Errorf("script backend: Path %q must be absolute", path)
+	}
+	if filepath.Clean(path) != path {
+		return nil, fmt.Errorf("script backend: Path %q must be normalized (no `..`, no `//`)", path)
+	}
+	opts.Path = path
 	if _, err := os.Stat(opts.Path); err != nil {
 		return nil, fmt.Errorf("script backend: stat %s: %w", opts.Path, err)
 	}
@@ -526,8 +538,15 @@ func (b *ScriptBackend) exec(ctx context.Context, mode string, args []string, ex
 // archive.script.env.* entries are passed through verbatim. extra
 // overrides anything in b.env so callers can supply per-invocation
 // values (e.g. LOGPOND_SEGMENT_*).
+//
+// Phase 16 task 7 (security review): Logpond's own secrets are scrubbed
+// from the inherited environment. AWS_* (used by the S3 backend) and
+// every LOGPOND_* var the parent saw are dropped before the explicit
+// LOGPOND_* contract values + operator-supplied archive.script.env.*
+// entries are appended. Standard system vars (PATH, HOME, USER, ...) and
+// anything else the operator set on the parent process pass through.
 func (b *ScriptBackend) buildEnv(mode, invocationID string, extra map[string]string) []string {
-	env := os.Environ()
+	env := scrubInheritedEnv(os.Environ())
 	env = append(env, "LOGPOND_MODE="+mode)
 	env = append(env, "LOGPOND_INVOCATION_ID="+invocationID)
 	env = append(env, "LOGPOND_MANIFEST_VERSION=1")
@@ -541,6 +560,42 @@ func (b *ScriptBackend) buildEnv(mode, invocationID string, extra map[string]str
 		env = append(env, k+"="+v)
 	}
 	return env
+}
+
+// scrubInheritedEnv drops env entries whose keys match a Logpond-owned
+// secret namespace before passing the rest to the script subprocess.
+// Returns a fresh slice; the input is not modified.
+func scrubInheritedEnv(env []string) []string {
+	out := make([]string, 0, len(env))
+	for _, kv := range env {
+		eq := strings.IndexByte(kv, '=')
+		if eq <= 0 {
+			out = append(out, kv)
+			continue
+		}
+		key := kv[:eq]
+		if isScrubbedEnvKey(key) {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return out
+}
+
+// isScrubbedEnvKey returns true for env vars Logpond owns and that
+// should not leak into the script subprocess: AWS_* (potential S3
+// credentials whether Logpond or the operator put them there) and the
+// LOGPOND_* namespace as a whole (the explicit LOGPOND_SEGMENT_*,
+// LOGPOND_MODE, LOGPOND_INVOCATION_ID, LOGPOND_MANIFEST_VERSION values
+// are added back deliberately by buildEnv).
+func isScrubbedEnvKey(key string) bool {
+	switch {
+	case strings.HasPrefix(key, "AWS_"):
+		return true
+	case strings.HasPrefix(key, "LOGPOND_"):
+		return true
+	}
+	return false
 }
 
 // segmentEnv returns the PRD §7.9.3 LOGPOND_SEGMENT_* env entries for

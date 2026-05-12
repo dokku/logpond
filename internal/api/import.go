@@ -74,6 +74,10 @@ func (s *Server) handleImport(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "bad_request", "parquet part: "+err.Error(), nil)
 		return
 	}
+	if err := verifyParquetMagic(parquetTmp); err != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", "parquet part: "+err.Error(), nil)
+		return
+	}
 	if err := savePart(r, "manifest", manifestTmp); err != nil {
 		writeError(w, http.StatusBadRequest, "bad_request", "manifest part: "+err.Error(), nil)
 		return
@@ -174,6 +178,44 @@ func (s *Server) handleImport(w http.ResponseWriter, r *http.Request) {
 		Persistent: importPersistent,
 		Overlaps:   overlaps,
 	})
+}
+
+// verifyParquetMagic rejects uploads that aren't Parquet by inspecting
+// the 4-byte file magic. PRD §7.10 + §13.12: the sideload endpoint must
+// accept only Parquet payloads; a wrong file type otherwise wastes the
+// SHA-256 hash and the rename into the rehydrated dir. Parquet files
+// start and end with the ASCII bytes "PAR1".
+func verifyParquetMagic(path string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	st, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	if st.Size() < 8 {
+		return errors.New("file too small to be a Parquet")
+	}
+
+	head := make([]byte, 4)
+	if _, err := io.ReadFull(f, head); err != nil {
+		return fmt.Errorf("reading parquet header: %w", err)
+	}
+	if string(head) != "PAR1" {
+		return errors.New("not a Parquet file: missing PAR1 header")
+	}
+
+	tail := make([]byte, 4)
+	if _, err := f.ReadAt(tail, st.Size()-4); err != nil {
+		return fmt.Errorf("reading parquet footer: %w", err)
+	}
+	if string(tail) != "PAR1" {
+		return errors.New("not a Parquet file: missing PAR1 footer")
+	}
+	return nil
 }
 
 func savePart(r *http.Request, name, dst string) error {

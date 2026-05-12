@@ -621,6 +621,100 @@ func TestScript_MissingPath_NewBackendFails(t *testing.T) {
 	}
 }
 
+// TestScript_RejectsRelativePath: the security audit (Phase 16 task 7)
+// requires absolute, normalized script paths so an env-overlay can't
+// point Logpond at a file outside the container layout.
+func TestScript_RejectsRelativePath(t *testing.T) {
+	_, err := NewScriptBackend(ScriptOptions{Path: "scripts/archive.sh"})
+	if err == nil {
+		t.Fatal("expected error for relative path")
+	}
+	if !strings.Contains(err.Error(), "absolute") {
+		t.Fatalf("error should mention absolute: %v", err)
+	}
+}
+
+// TestScript_RejectsParentTraversal: paths containing `..` are rejected
+// even when nominally absolute.
+func TestScript_RejectsParentTraversal(t *testing.T) {
+	_, err := NewScriptBackend(ScriptOptions{Path: "/etc/logpond/../passwd"})
+	if err == nil {
+		t.Fatal("expected error for traversal path")
+	}
+	if !strings.Contains(err.Error(), "normalized") {
+		t.Fatalf("error should mention normalized: %v", err)
+	}
+}
+
+// TestScript_ScrubsInheritedEnv: AWS_* and LOGPOND_* keys present on the
+// parent process must not leak into the script's environment. The
+// explicit LOGPOND_MODE / LOGPOND_INVOCATION_ID / LOGPOND_MANIFEST_VERSION
+// values are restored deliberately by buildEnv.
+func TestScript_ScrubsInheritedEnv(t *testing.T) {
+	dir := t.TempDir()
+	script := writeEnvDumpScript(t, dir)
+	be := newBackend(t, script, ScriptOptions{Env: map[string]string{"PASSTHROUGH_VAR": "allowed"}})
+
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "should-not-leak")
+	t.Setenv("LOGPOND_ARCHIVE_S3_SECRET_ACCESS_KEY", "should-not-leak")
+	t.Setenv("CUSTOM_OPERATOR_VAR", "passes-through")
+
+	env := be.buildEnv(ModeArchive, "inv-test", map[string]string{
+		"LOGPOND_SEGMENT_ID": "seg-x",
+	})
+
+	for _, kv := range env {
+		k := kv
+		if i := strings.IndexByte(kv, '='); i > 0 {
+			k = kv[:i]
+		}
+		if strings.HasPrefix(k, "AWS_") {
+			t.Fatalf("AWS_* env leaked into script env: %s", kv)
+		}
+		if strings.HasPrefix(k, "LOGPOND_") {
+			switch k {
+			case "LOGPOND_MODE", "LOGPOND_INVOCATION_ID",
+				"LOGPOND_MANIFEST_VERSION", "LOGPOND_SEGMENT_ID":
+				// explicit contract; allowed
+			default:
+				t.Fatalf("non-contract LOGPOND_* env leaked: %s", kv)
+			}
+		}
+	}
+
+	if !containsKV(env, "PASSTHROUGH_VAR=allowed") {
+		t.Fatalf("operator-supplied env var was dropped")
+	}
+	if !containsKV(env, "CUSTOM_OPERATOR_VAR=passes-through") {
+		t.Fatalf("non-Logpond inherited env var was dropped")
+	}
+	if !containsKV(env, "LOGPOND_MODE=archive") {
+		t.Fatalf("contract LOGPOND_MODE missing")
+	}
+	if !containsKV(env, "LOGPOND_SEGMENT_ID=seg-x") {
+		t.Fatalf("contract LOGPOND_SEGMENT_ID missing")
+	}
+}
+
+func writeEnvDumpScript(t *testing.T, dir string) string {
+	t.Helper()
+	path := filepath.Join(dir, "envdump.sh")
+	body := "#!/usr/bin/env bash\nenv\nexit 0\n"
+	if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
+		t.Fatalf("write env-dump script: %v", err)
+	}
+	return path
+}
+
+func containsKV(env []string, want string) bool {
+	for _, kv := range env {
+		if kv == want {
+			return true
+		}
+	}
+	return false
+}
+
 // TestScript_WaitDelayFiresWhenSIGTERMIgnored sanity-checks the helper
 // when the fixture script refuses to exit on SIGTERM but the WaitDelay
 // is short enough to fire.

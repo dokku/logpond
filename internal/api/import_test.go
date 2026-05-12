@@ -71,6 +71,14 @@ func buildMultipartBody(t *testing.T, parquet, manifest []byte) (*bytes.Buffer, 
 	return body, mw.FormDataContentType()
 }
 
+// parquetBytes wraps test payload bytes with the PAR1 magic header and
+// footer the upload handler now enforces. Tests use this to construct
+// synthetic Parquet content without dragging in the DuckDB writer.
+func parquetBytes(body string) []byte {
+	const magic = "PAR1"
+	return []byte(magic + body + magic)
+}
+
 func sampleManifest(id string, parquet []byte, start time.Time) segments.Manifest {
 	return segments.Manifest{
 		ManifestVersion:  segments.ManifestVersion,
@@ -92,7 +100,7 @@ func sampleManifest(id string, parquet []byte, start time.Time) segments.Manifes
 
 func TestImport_HappyPath(t *testing.T) {
 	srv, cat, dataDir := newImportServer(t)
-	parquet := []byte("parquet-content")
+	parquet := parquetBytes("parquet-content")
 	start := time.Date(2026, 4, 12, 1, 0, 0, 0, time.UTC)
 	m := sampleManifest("202604120100", parquet, start)
 	manifestBuf, err := m.Encode()
@@ -130,9 +138,28 @@ func TestImport_HappyPath(t *testing.T) {
 	}
 }
 
+func TestImport_NotParquet_400(t *testing.T) {
+	srv, _, _ := newImportServer(t)
+	// No PAR1 magic; handler must reject before SHA verification.
+	bogus := []byte("definitely not a parquet file body")
+	m := sampleManifest("nope-1", bogus, time.Now().UTC().Truncate(time.Hour))
+	mfBuf, _ := m.Encode()
+	body, ct := buildMultipartBody(t, bogus, mfBuf)
+	req := httptest.NewRequest(http.MethodPost, "/api/import", body)
+	req.Header.Set("Content-Type", ct)
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status: %d body=%s", rr.Code, rr.Body.String())
+	}
+	if got := rr.Body.String(); !bytes.Contains([]byte(got), []byte("PAR1")) {
+		t.Fatalf("expected error to mention PAR1; got %s", got)
+	}
+}
+
 func TestImport_BadSHA_400(t *testing.T) {
 	srv, _, _ := newImportServer(t)
-	parquet := []byte("parquet-content")
+	parquet := parquetBytes("parquet-content")
 	m := sampleManifest("seg-x", parquet, time.Now().UTC().Truncate(time.Hour))
 	m.ParquetSHA256 = "deadbeef" // mismatch
 	buf, _ := m.Encode()
@@ -160,7 +187,7 @@ func TestImport_DuplicateID_409(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("insert: %v", err)
 	}
-	parquet := []byte("payload")
+	parquet := parquetBytes("payload")
 	m := sampleManifest(id, parquet, time.Now().UTC().Truncate(time.Hour))
 	buf, _ := m.Encode()
 	body, ct := buildMultipartBody(t, parquet, buf)
@@ -189,7 +216,7 @@ func TestImport_OverlapPopulated(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("insert: %v", err)
 	}
-	parquet := []byte("payload-overlap")
+	parquet := parquetBytes("payload-overlap")
 	m := sampleManifest("imported-1", parquet, time.Date(2026, 4, 12, 0, 0, 0, 0, time.UTC))
 	buf, _ := m.Encode()
 	body, ct := buildMultipartBody(t, parquet, buf)
@@ -209,7 +236,7 @@ func TestImport_OverlapPopulated(t *testing.T) {
 
 func TestImport_PersistentQueryParam(t *testing.T) {
 	srv, _, _ := newImportServer(t)
-	parquet := []byte("payload-persistent")
+	parquet := parquetBytes("payload-persistent")
 	m := sampleManifest("pers-1", parquet, time.Now().UTC().Truncate(time.Hour))
 	buf, _ := m.Encode()
 	body, ct := buildMultipartBody(t, parquet, buf)
