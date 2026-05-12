@@ -134,6 +134,145 @@ func scanSegment(r rowScanner) (Segment, error) {
 	return s, nil
 }
 
+// Segment lifecycle states recorded in segments.state. The values here
+// mirror PRD §10.2's enumeration.
+const (
+	StateActive     = "active"
+	StateSealed     = "sealed"
+	StateArchived   = "archived"
+	StateRehydrated = "rehydrated"
+	StateLost       = "lost"
+)
+
+// InsertSegment writes a new segments row. State defaults to
+// StateActive when empty; CreatedAt defaults to time.Now().UTC() when
+// zero.
+func (c *Catalog) InsertSegment(ctx context.Context, s Segment) error {
+	if s.State == "" {
+		s.State = StateActive
+	}
+	if s.CreatedAt.IsZero() {
+		s.CreatedAt = time.Now().UTC()
+	}
+	_, err := c.db.ExecContext(ctx, `INSERT INTO segments(
+        id, state, time_start, time_end, row_count, size_bytes, size_compressed,
+        local_path, s3_url, archive_ref, manifest_sha256, parquet_sha256, source_names,
+        created_at, sealed_at, archived_at, rehydrated_at, evict_after
+    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		s.ID, s.State, s.TimeStart.UTC(), s.TimeEnd.UTC(), s.RowCount, s.SizeBytes, s.SizeCompressed,
+		s.LocalPath, s.S3URL, s.ArchiveRef, s.ManifestSHA256, s.ParquetSHA256, s.SourceNames,
+		s.CreatedAt.UTC(), s.SealedAt, s.ArchivedAt, s.RehydratedAt, s.EvictAfter,
+	)
+	if err != nil {
+		return fmt.Errorf("inserting segment %s: %w", s.ID, err)
+	}
+	return nil
+}
+
+// UpdateSegmentState transitions a segment to newState and optionally
+// updates the timestamp column that corresponds to the new state.
+func (c *Catalog) UpdateSegmentState(ctx context.Context, id, newState string) error {
+	now := time.Now().UTC()
+	var col string
+	switch newState {
+	case StateSealed:
+		col = "sealed_at"
+	case StateArchived:
+		col = "archived_at"
+	case StateRehydrated:
+		col = "rehydrated_at"
+	}
+	q := `UPDATE segments SET state = ?`
+	args := []any{newState}
+	if col != "" {
+		q += `, ` + col + ` = ?`
+		args = append(args, now)
+	}
+	q += ` WHERE id = ?`
+	args = append(args, id)
+	res, err := c.db.ExecContext(ctx, q, args...)
+	if err != nil {
+		return fmt.Errorf("updating segment %s state: %w", id, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return fmt.Errorf("segment %s not found", id)
+	}
+	return nil
+}
+
+// SealedSegmentUpdate captures the fields populated when an active
+// segment finishes sealing into a Parquet file.
+type SealedSegmentUpdate struct {
+	RowCount       int64
+	SizeBytes      int64
+	SizeCompressed int64
+	LocalPath      string
+	ParquetSHA256  string
+	SourceNames    string // JSON-encoded array per §10.2
+	TimeStart      time.Time
+	TimeEnd        time.Time
+}
+
+// MarkSegmentSealed updates an active segment row to the sealed state
+// with the finalized size, checksum, and timing fields populated.
+func (c *Catalog) MarkSegmentSealed(ctx context.Context, id string, u SealedSegmentUpdate) error {
+	now := time.Now().UTC()
+	_, err := c.db.ExecContext(ctx, `UPDATE segments SET
+        state = ?,
+        time_start = ?,
+        time_end = ?,
+        row_count = ?,
+        size_bytes = ?,
+        size_compressed = ?,
+        local_path = ?,
+        parquet_sha256 = ?,
+        source_names = ?,
+        sealed_at = ?
+    WHERE id = ?`,
+		StateSealed, u.TimeStart.UTC(), u.TimeEnd.UTC(), u.RowCount, u.SizeBytes,
+		sql.NullInt64{Int64: u.SizeCompressed, Valid: u.SizeCompressed > 0},
+		sql.NullString{String: u.LocalPath, Valid: u.LocalPath != ""},
+		sql.NullString{String: u.ParquetSHA256, Valid: u.ParquetSHA256 != ""},
+		sql.NullString{String: u.SourceNames, Valid: u.SourceNames != ""},
+		now, id,
+	)
+	if err != nil {
+		return fmt.Errorf("marking segment %s sealed: %w", id, err)
+	}
+	return nil
+}
+
+// DeleteSegment removes a segments row. Used for crash recovery when a
+// catalog entry points at a missing file (PRD §7.2).
+func (c *Catalog) DeleteSegment(ctx context.Context, id string) error {
+	_, err := c.db.ExecContext(ctx, `DELETE FROM segments WHERE id = ?`, id)
+	return err
+}
+
+// ListSegmentsByState returns segments in the given state ordered by
+// time_start ascending so callers process them oldest-first.
+func (c *Catalog) ListSegmentsByState(ctx context.Context, state string) ([]Segment, error) {
+	rows, err := c.db.QueryContext(ctx,
+		`SELECT `+segmentColumns+` FROM segments WHERE state = ? ORDER BY time_start ASC`, state)
+	if err != nil {
+		return nil, fmt.Errorf("listing segments in state %s: %w", state, err)
+	}
+	defer rows.Close()
+	var out []Segment
+	for rows.Next() {
+		s, err := scanSegment(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, s)
+	}
+	return out, rows.Err()
+}
+
 // AppliedMigrations returns the versions recorded in the migrations
 // table, in ascending order. Useful for diagnostics and tests.
 func (c *Catalog) AppliedMigrations(ctx context.Context) ([]int, error) {

@@ -21,6 +21,7 @@ import (
 	"github.com/dokku/logpond/internal/config"
 	"github.com/dokku/logpond/internal/ingest"
 	"github.com/dokku/logpond/internal/metrics"
+	"github.com/dokku/logpond/internal/segments"
 )
 
 var version = "0.0.0-dev"
@@ -99,7 +100,47 @@ func run() error {
 		extractors[src.Name] = ingest.NewExtractor(ingest.SourceFromConfig(src.Name, src.Extract))
 	}
 
-	flusher := ingest.NewFlusher(buf, time.Second, bufCap, nil, logger)
+	window, err := config.ParseDuration(cfg.SegmentWindow)
+	if err != nil {
+		return fmt.Errorf("parsing segment_window: %w", err)
+	}
+	sealInterval, err := config.ParseDuration(cfg.SealingInterval)
+	if err != nil {
+		return fmt.Errorf("parsing sealing_interval: %w", err)
+	}
+	mgr, err := segments.New(segments.Options{
+		DataDir:     cfg.DataDir,
+		Window:      window,
+		SealGrace:   sealInterval,
+		MemoryLimit: cfg.MemoryLimits.DuckDB,
+		Catalog:     cat,
+		Logger:      logger,
+	})
+	if err != nil {
+		return fmt.Errorf("starting segment manager: %w", err)
+	}
+	defer func() {
+		if err := mgr.Close(); err != nil {
+			logger.Warn("closing segment manager", "err", err)
+		}
+	}()
+
+	rec, err := mgr.Recover(ctx)
+	if err != nil {
+		return fmt.Errorf("recovering segments: %w", err)
+	}
+	logger.Info("segment recovery complete",
+		"active_registered", len(rec.ActiveRegistered),
+		"sealed_registered", len(rec.SealedRegistered),
+		"orphans_moved", len(rec.OrphansMoved),
+		"lost_marked", len(rec.LostMarked),
+	)
+
+	flusher := ingest.NewFlusher(buf, time.Second, bufCap, func(ctx context.Context, batch []ingest.Event) {
+		if err := mgr.Flush(ctx, batch); err != nil {
+			logger.Error("flushing batch to segment", "count", len(batch), "err", err)
+		}
+	}, logger)
 
 	srv := api.New(api.Options{
 		Logger:     logger,
@@ -119,6 +160,12 @@ func run() error {
 	go func() {
 		defer wg.Done()
 		flusher.Run(ctx)
+	}()
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		mgr.RunSealLoop(ctx, sealInterval)
 	}()
 
 	wg.Add(1)
