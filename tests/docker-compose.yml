@@ -1,0 +1,68 @@
+services:
+  registry:
+    image: registry:2
+    container_name: logpond-test-registry
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      - REGISTRY_HTTP_ADDR=127.0.0.1:5000
+
+  minio:
+    image: minio/minio:latest
+    container_name: logpond-test-minio
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      - MINIO_ROOT_USER=minioadmin
+      - MINIO_ROOT_PASSWORD=minioadmin
+    # Bind to 0.0.0.0 so containers reaching the host via the docker
+    # bridge gateway (172.17.0.1) can still connect.
+    command: ["server", "/data", "--address", "0.0.0.0:9000", "--console-address", "127.0.0.1:9001"]
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9000/minio/health/live"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  minio-init:
+    image: minio/mc:latest
+    container_name: logpond-test-minio-init
+    network_mode: host
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >
+        mc alias set local http://127.0.0.1:9000 minioadmin minioadmin &&
+        mc mb --ignore-existing local/logpond-archive &&
+        echo "minio bucket ready"
+
+  dokku:
+    build:
+      context: ./dokku
+      args:
+        DOKKU_VERSION: ${DOKKU_VERSION:-latest}
+    container_name: logpond-test-dokku
+    restart: unless-stopped
+    profiles: ["compose-mode"]
+    depends_on:
+      registry:
+        condition: service_started
+      minio-init:
+        condition: service_completed_successfully
+    environment:
+      - DOKKU_HOSTNAME=dokku.test
+      - DOKKU_HOST_ROOT=${LOGPOND_TEST_HOST_DIR}/home/dokku
+      - DOKKU_LIB_HOST_ROOT=${LOGPOND_TEST_HOST_DIR}/var/lib/dokku
+    # Map host 80 -> dokku's nginx on container port 80. The setup
+    # script configures the logpond app's ports map to http:80:8080 so
+    # its per-app nginx listens on the same port as every other app.
+    ports:
+      - "80:80"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ${LOGPOND_TEST_HOST_DIR}:/mnt/dokku
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ../:/logpond-src:ro

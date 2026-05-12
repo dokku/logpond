@@ -1,22 +1,28 @@
-FROM golang:1.26-alpine AS builder
+FROM golang:1.26-bookworm AS builder
 
-RUN apk add --no-cache build-base
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends build-essential bash curl ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src
-COPY go.mod ./
+COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 
+RUN bash scripts/vendor.sh
+
+ARG VERSION=0.0.0-dev
 ENV CGO_ENABLED=1
-RUN go build -trimpath -ldflags='-s -w' -o /out/logpond ./cmd/logpond
+RUN go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o /out/logpond ./cmd/logpond
 
-FROM alpine:3.20
+FROM debian:bookworm-slim
 
-RUN apk add --no-cache ca-certificates
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /out/logpond /usr/local/bin/logpond
 
 EXPOSE 8080
-VOLUME ["/data", "/etc/logpond"]
 
 ENTRYPOINT ["/usr/local/bin/logpond"]

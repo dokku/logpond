@@ -13,7 +13,7 @@ ALPINE_VERSION="3.14.9"
 OPEN_PROPS_VERSION="1.7.13"
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-DEST="$ROOT/static/vendor"
+DEST="$ROOT/internal/ui/static/vendor"
 
 mkdir -p "$DEST"
 

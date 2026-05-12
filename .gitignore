@@ -2,8 +2,9 @@ docs/IMPLEMENTATION-PLAN.md
 /logpond
 tmp/
 
-# Vendored frontend dependencies — fetched by scripts/vendor.sh.
-# Keep the README + .gitkeep tracked so the directory exists.
-static/vendor/*
-!static/vendor/.gitkeep
-!static/vendor/README.md
+# Vendored frontend dependencies - fetched by scripts/vendor.sh into the
+# location the //go:embed in internal/ui picks up. Keep the README +
+# .gitkeep tracked so the directory exists.
+internal/ui/static/vendor/*
+!internal/ui/static/vendor/.gitkeep
+!internal/ui/static/vendor/README.md

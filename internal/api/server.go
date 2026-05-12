@@ -160,6 +160,7 @@ func New(opts Options) *Server {
 	r.Delete("/api/rehydrated/{id}", s.handleDeleteRehydrated)
 	r.Post("/api/import", s.handleImport)
 	r.Get("/api/jobs/{id}", s.handleGetJob)
+	r.Get("/api/segments", s.handleListSegments)
 	if s.liveTail != nil {
 		r.Get("/api/query/stream", s.liveTail.ServeHTTP)
 	}

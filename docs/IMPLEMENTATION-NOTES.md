@@ -590,8 +590,9 @@ PRD §7.3.4 only specifies case-insensitive substring.
   ... HTMX, Alpine, Open Props ... vendored from a release tag."
 - **What ships.** `scripts/vendor.sh` fetches the pinned versions of
   htmx, htmx-ext-ws, Alpine.js, and Open Props CSS into
-  `static/vendor/` on demand. The Dockerfile invokes the same script
-  during image build; operators (and CI) run it once locally.
+  `internal/ui/static/vendor/` on demand. The Dockerfile invokes the
+  same script during image build; operators (and CI) run it once
+  locally.
 
 Reasons for keeping the minified blobs out of git:
 - The four files weigh ~55KB minified but balloon the diff noise on
@@ -601,10 +602,11 @@ Reasons for keeping the minified blobs out of git:
   parallel "which version is current" sources.
 - Local dev and Dockerfile share one workflow.
 
-The `//go:embed all:static` directive accepts the empty `vendor/`
-directory (the `.gitkeep` and `README.md` already inside it satisfy the
-non-empty requirement). The browser sees 404s for the vendor URLs until
-`scripts/vendor.sh` is run.
+The vendor directory lives directly under the package that owns the
+`//go:embed all:static` directive (`internal/ui`) so the assets are
+picked up by the embed without any extra copying step in the Dockerfile.
+A `.gitkeep` plus `README.md` keep the directory tracked; the rest is
+gitignored.
 
 ### Live tail uses a parallel `/ui/query/stream` WebSocket
 
@@ -786,3 +788,133 @@ needs a full catalog scan + per-segment size summation). The
 metrics. Prometheus scrape intervals are typically 15s or higher, so
 the gauges remain at most one tick behind reality — well within the
 fidelity Prometheus expects.
+
+## Phase 15 — Container image and Dokku deployment
+
+### `VOLUME` directives dropped from the Dockerfile
+
+- **PRD §15** "EXPOSE 8080, VOLUME /data /etc/logpond" in the deployment
+  guide.
+- **What ships.** The image keeps `EXPOSE 8080` but no `VOLUME` lines.
+
+Dokku always mounts persistent state via `dokku storage:mount`, which is
+a bind mount declared on the app rather than a Dockerfile directive.
+Declaring `VOLUME` on top of that creates an unused anonymous volume on
+every `docker run` invocation that omits `-v` (which clutters
+`docker volume ls` on dev hosts) and gives no benefit on Dokku. `/data`
+is the only path Logpond writes to; `/etc/logpond` is optional config
+that operators usually deliver through `dokku config:set`.
+
+### Vendored frontend assets live under the embed root
+
+- **PRD §15.2** assumes the Dockerfile produces a working binary "with
+  embedded static assets."
+- **What changed.** `scripts/vendor.sh` now writes to
+  `internal/ui/static/vendor/` (next to `css/` and `js/`), which is the
+  directory the `//go:embed all:static` in `internal/ui` actually picks
+  up. Previously the script wrote to a repo-root `static/vendor/` that
+  no embed referenced, so the vendor URLs would have 404'd in every
+  built binary.
+
+The Phase 12 note above has been updated to reflect this; the
+`.gitignore` and tracked `.gitkeep`/`README.md` moved with it.
+
+### Smoke test runs as a bats suite, not a shell script
+
+- **Plan text (Phase 15, task 5).** "A scripted test in
+  `scripts/smoke-dokku.sh` that ... verifies events appear in the
+  Search view."
+- **What ships.** `tests/*.bats` driven by `tests/docker-compose.yml`.
+  Three suites cover deploy + ingest (`logpond_deploy.bats`),
+  Vector-sink wiring (`logpond_vector.bats`), and archive + rehydrate
+  (`logpond_archive.bats`). The compose stack includes Dokku itself, a
+  local `registry:2` for the test image, and a MinIO instance for the
+  S3 archive path.
+
+`Makefile` orchestrates both `setup` (compose mode) and `setup-native`
+(host-installed Dokku) flows, mirroring `dokku-letsencrypt`. The
+hand-rolled `smoke-dokku.sh` would duplicate the deploy + ingest case
+the bats suite already covers, so it was not written.
+
+### `/api/segments` was missing and shipped with Phase 15
+
+PRD §13.8 specifies `GET /api/segments` but earlier phases only landed
+the parallel UI fragment at `/ui/admin/segments`. The bats archive
+suite needs the JSON endpoint to look up sealed segment ids, so the
+handler ships in this phase. It filters in Go on top of
+`catalog.ListSegments` rather than pushing the predicates into SQL,
+which is fine at the segment counts Logpond tracks (typically a few
+hundred per host).
+
+### Container image base is debian-bookworm-slim, not alpine
+
+PRD §15.2 picks alpine "because DuckDB's CGo loadout is easier on
+alpine and the size difference is negligible after we add CA certs."
+That premise turned out to be wrong for `linux/arm64`: DuckDB's bundled
+HTTPLib references `__res_init`, which musl provides only as a stub in
+some versions and not at all on the alpine-arm64 toolchain we hit.
+Linker fails with `undefined reference to __res_init` plus a handful
+of other glibc-only symbols (`malloc_trim`, `backtrace_symbols`).
+
+Switching to `debian:bookworm-slim` resolves the link errors without
+inflating the image much (~80MB compressed for the runtime stage) and
+keeps multi-arch builds working in CI. The Dockerfile builder stage
+also moves to `golang:1.26-bookworm` for the same reason.
+
+### Dokku-in-docker shims required by the bats suite
+
+The bats suite drives a real Dokku running inside docker compose, but
+several Dokku assumptions fail under nested Docker. The setup script
+papers over the gaps so tests can still exercise real Dokku behavior:
+
+- **Per-deploy port healthcheck disabled** (`dokku checks:disable`).
+  Dokku's port check uses `nsenter` to peek inside the container; with
+  nested Docker the dokku container itself can't cross the namespace
+  boundary. We rely on the post-deploy `/healthz` poll instead.
+- **Explicit ports map** (`dokku ports:set logpond http:80:8080`).
+  Dokku derives the per-app nginx listen port from the image's
+  `EXPOSE` directive; Logpond ships `EXPOSE 8080`, but every other
+  Dokku app in the compose stack defaults to 80. Aligning logpond on
+  port 80 lets the compose `80:80` host port mapping route to either
+  app via Host-based vhost routing.
+- **`vector-sink` URI uses the discovered bridge gateway**. The
+  vector container Dokku launches runs in bridge mode, not on the
+  host network, so it can't reach `127.0.0.1:80`. The bats setup
+  inspects `docker network inspect bridge` to find the gateway IP
+  (172.17.0.1 on plain Linux, 192.168.x.1 on macOS Docker Desktop /
+  OrbStack) and points vector at `${gateway}:80` with the logpond
+  vhost in the `Host` header.
+- **`request[headers]` DSN form** for the vector-sink. Vector's HTTP
+  sink expects a nested `request.headers` map, not the flat `headers`
+  produced by `headers[Host]=...`. Dokku's DSN parser correctly
+  builds the nested shape if you use `request[headers][Host]=...`.
+- **`dokku logs:vector-logs` is `docker logs --follow` under the
+  hood** and never returns. The bats suite inspects the vector
+  container's docker state directly to confirm it's running.
+
+These are test-environment workarounds; production Dokku hosts do not
+need any of them.
+
+### `retention.archive_before_delete=false` for the bats environment
+
+Logpond rejects boot with `retention: max_age or max_size must be set
+when archive_before_delete=true with an active archive backend`. The
+bats setup keeps the archive backend enabled (to exercise it) but
+turns off `archive_before_delete` so no `max_age` floor is required.
+The archive tests trigger archival explicitly via `POST /api/archive`.
+
+### Image delivery uses an in-stack local registry
+
+The bats setup builds `127.0.0.1:5000/logpond:test` on the host and
+pushes it to a `registry:2` container that runs alongside Dokku in the
+compose file. Dokku then pulls via `dokku git:from-image` using the
+same registry URL. Docker treats `127.0.0.1:5000` as an insecure
+registry by default, so no daemon configuration is required.
+
+The alternatives we considered:
+
+- `docker save | docker load` over the bind-mounted socket would
+  avoid a registry entirely but adds tens of seconds per test run on a
+  large CGO binary.
+- A real GHCR pull would gate every CI run on registry availability and
+  authentication, which is overkill for a smoke test.
