@@ -7,7 +7,7 @@ Tracks progress against `IMPLEMENTATION-PLAN.md`.
 - [x] Phase 2 — Ingest path
 - [x] Phase 3 — Segment lifecycle (active + sealing)
 - [x] Phase 4 — Filter tree + canonical query API
-- [ ] Phase 5 — Datadog-style search parser
+- [x] Phase 5 — Datadog-style search parser
 - [ ] Phase 6 — Facets and autocomplete
 - [ ] Phase 7 — Retention
 - [ ] Phase 8 — Archive backend interface + S3 implementation

@@ -76,6 +76,7 @@ func New(opts Options) *Server {
 	r.Get("/healthz", s.handleHealthz)
 	r.Post("/ingest/{source_name}", s.handleIngest)
 	r.Post("/api/query", s.handleQuery)
+	r.Post("/api/parse-query", s.handleParseQuery)
 
 	return s
 }

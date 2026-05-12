@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/dokku/logpond/internal/query"
+	"github.com/dokku/logpond/internal/query/parser"
 )
 
 // queryRequest is the wire shape of POST /api/query (§13.4). The
@@ -85,18 +86,31 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "bad_request", "q, filter, and filters are mutually exclusive", nil)
 		return
 	}
-	if req.Q != "" {
-		writeError(w, http.StatusNotImplemented, "bad_request", "search-bar parsing (Form A) lands in Phase 5", nil)
-		return
-	}
-
-	if s.executor == nil {
-		writeError(w, http.StatusServiceUnavailable, "internal_error", "query executor not configured", nil)
-		return
-	}
 
 	var root query.Node
-	if len(req.Filter) > 0 {
+	search := req.Search
+	if req.Q != "" {
+		pres, err := parser.Parse(req.Q)
+		if err != nil {
+			var pe parser.ParseError
+			if errors.As(err, &pe) {
+				writeError(w, http.StatusBadRequest, "invalid_query_syntax", pe.Msg, map[string]any{"column": pe.Col})
+				return
+			}
+			writeError(w, http.StatusBadRequest, "invalid_query_syntax", err.Error(), nil)
+			return
+		}
+		if pres.Filter != nil {
+			root = pres.Filter
+		}
+		if pres.Search != "" {
+			if search != "" {
+				search = search + " " + pres.Search
+			} else {
+				search = pres.Search
+			}
+		}
+	} else if len(req.Filter) > 0 {
 		n, err := query.UnmarshalNode(req.Filter)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, "invalid_filter", err.Error(), nil)
@@ -116,11 +130,16 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 		root = query.Group{Op: query.OpAnd, Children: nodes}
 	}
 
+	if s.executor == nil {
+		writeError(w, http.StatusServiceUnavailable, "internal_error", "query executor not configured", nil)
+		return
+	}
+
 	resp, err := s.executor.Run(r.Context(), query.Request{
 		From:         req.TimeRange.From.UTC(),
 		To:           req.TimeRange.To.UTC(),
 		Filter:       root,
-		Search:       req.Search,
+		Search:       search,
 		Sort:         req.Sort,
 		Limit:        req.Limit,
 		Cursor:       req.Cursor,

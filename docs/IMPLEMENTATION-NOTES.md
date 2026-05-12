@@ -134,3 +134,50 @@ intra-segment row number because the per-segment merge already keeps
 results stable for typical workloads. If we later see same-timestamp
 collisions in a single segment, we can extend the cursor without
 breaking older clients (the field is internal).
+
+## Phase 5 — Datadog-style search parser
+
+### Free-text terms in nested contexts
+
+PRD §7.3.4 only describes top-level free-text: "Top-level `search` (or
+unquoted text in the search bar) does case-insensitive substring match
+against `message` and `raw`." It does not say what happens to a bare
+term inside `(...)` or under `NOT`. The parser handles those by
+compiling the nested term into a `message contains` leaf and emitting
+a warning. That keeps the user's grouping intent intact (free-text
+under `NOT (...)` or as one branch of an `OR` would otherwise be
+silently dropped if we only honored top-level terms).
+
+### Bare non-core fields
+
+PRD §7.3.2 says: "Bare identifiers that aren't in the `core-field`
+list and aren't preceded by `@` are treated as free-text terms." The
+parser interprets that strictly when the bare identifier stands alone
+(`foo` becomes a free-text term). When the identifier is immediately
+followed by a colon (`custom_field:value`), the parser still compiles
+it as a field predicate but emits a warning suggesting the `@` prefix.
+Treating `custom_field:value` as the term `custom_field` followed by
+an orphan `:value` would surface as a confusing syntax error, so we
+prefer the lenient path with a warning.
+
+### `[* TO *]` and `@path` shorthands
+
+Two corner cases the PRD doesn't pin down:
+
+- `field:[* TO *]` (both bounds open) compiles to a single `exists`
+  leaf on the field. Equivalent to `field:*` and the only sensible
+  reading we could find.
+- `@path` with no trailing `:value` compiles to an `exists` leaf on
+  `attributes.path`. The explicit form remains `@path:*`; the
+  no-colon shorthand is a small ergonomic addition that does not
+  affect tree shape.
+
+### Non-prefix wildcards compile to `contains` with stripping
+
+§7.3.2 says non-prefix wildcards "compile to a slower full-scan
+substring match using `contains`" but doesn't specify what value goes
+into the `contains` op. The parser strips all `*` and `?` characters
+from the bare token and uses the remainder as the contains target.
+For `foo*bar` this is imperfect (it matches anything containing
+`foobar` rather than `foo...bar`), but the warning emitted alongside
+flags the imprecision so an operator can refine the query.
