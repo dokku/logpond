@@ -918,3 +918,94 @@ The alternatives we considered:
   large CGO binary.
 - A real GHCR pull would gate every CI run on registry availability and
   authentication, which is overkill for a smoke test.
+
+## Phase 16 — Soak test and hardening
+
+### Security audit findings (task 7)
+
+The §16 task-7 audit looked at four areas; one passed and three needed
+code fixes. The notes below describe what was found and how the fix
+landed; the test surface for each is small but explicit so a future
+regression is caught locally rather than in a soak.
+
+1. **Secrets in structured logs — PASS.** `cmd/logpond/main.go` calls
+   `cfg.Redacted()` (which `internal/config/config.go` implements) before
+   marshalling startup config to JSON, blanking `S3.AccessKeyID`,
+   `S3.SecretAccessKey`, and every `Archive.Script.Env` value. No HTTP
+   request body or header is logged by the chi middleware stack
+   (`RealIP` + `Recoverer` only), and the ingest path logs only source
+   name + parse error on rejection.
+
+2. **`/api/import` file-type validation — FIXED.** The handler used to
+   accept any bytes named `parquet` in the multipart form, deferring
+   detection to the SHA-256 compare against the manifest. After the fix
+   it inspects the 4-byte file head and tail for the PAR1 magic before
+   computing the SHA, returning 400 with a clear message on mismatch.
+   `TestImport_NotParquet_400` covers the negative path; existing tests
+   use a small `parquetBytes("...")` helper to satisfy the magic.
+
+3. **Script-backend env scrubbing — FIXED.** `buildEnv` previously
+   handed the script `os.Environ()` wholesale, leaking AWS_* credentials
+   and every LOGPOND_* config value from the parent. The PRD §7.9.3 env
+   table is an enumerated *contract* (LOGPOND_SEGMENT_*, LOGPOND_MODE,
+   LOGPOND_INVOCATION_ID, LOGPOND_MANIFEST_VERSION, plus operator-set
+   `archive.script.env.*`), so the fix is to scrub the two
+   Logpond-owned namespaces (`AWS_*` and `LOGPOND_*`) from the inherited
+   env before appending the contract values back. A denylist rather than
+   an allowlist preserves PATH, HOME, TZ, etc., and any FIXTURE_* the
+   test harness pokes via `t.Setenv`. `TestScript_ScrubsInheritedEnv`
+   asserts that leaked LOGPOND_/AWS_ vars disappear while operator and
+   system vars survive.
+
+4. **`archive.script.path` traversal — FIXED.** `NewScriptBackend` now
+   rejects the path unless it is absolute (`filepath.IsAbs`) and
+   normalized (`filepath.Clean(p) == p`). That covers the plan's literal
+   ask ("required to be an absolute path inside the container, no `..`
+   traversal") without `filepath.EvalSymlinks` (which would be too
+   restrictive on common deployments where `/usr/local/bin/...` resolves
+   through a symlink). `TestScript_RejectsRelativePath` and
+   `TestScript_RejectsParentTraversal` document the rejection messages.
+
+### Phase 16 deliverables landed in-tree
+
+The Phase 16 plan has eight tasks. The ones that can be expressed as
+durable artifacts ship in this phase; the ones that require external
+infrastructure or a human are documented as the operator's
+responsibility and are not gated by the in-tree definition of done.
+
+- **Task 1 (soak test) — driver landed.** `cmd/loadgen` drives sustained
+  and burst NDJSON ingest with configurable rate, duration, batch size,
+  concurrency, and message size. The actual 7-day run on a 2GB VM
+  remains an operator step (see `docs/SOAK-TEST.md`).
+- **Task 2 (burst test) — driver landed.** Same binary, `-burst-rate
+  5000 -burst-duration 10s`, runs the burst phase ahead of the
+  sustained phase so 429 backpressure and retry behaviour can be
+  observed in one pass.
+- **Task 3 (query bench) — landed.** `cmd/querybench` issues the
+  representative queries from PRD §8.1 and prints PASS/FAIL against the
+  per-case p95 targets.
+- **Task 4 (cross-tool Parquet) — script landed.** `scripts/verify-parquet.sh`
+  runs the DuckDB CLI, pyarrow, and pandas readers and reports per-tool
+  status. Tools not on PATH are reported as SKIPPED.
+- **Task 5 (archive backend matrix) — deferred to operator.** Requires
+  live AWS S3, Cloudflare R2, and MinIO endpoints; the existing
+  `internal/archive/s3_test.go` fake covers protocol correctness, and
+  the `tests/logpond_archive.bats` suite runs against MinIO.
+- **Task 6 (UI usability) — deferred to operator.** Requires a human
+  unfamiliar with the project; tracked as an open Phase 16 line item.
+- **Task 7 (security review) — done in this phase.** See above.
+- **Task 8 (documentation pass) — landed.** README + `docs/TROUBLESHOOTING.md`
+  + `docs/FAQ.md` shipped alongside this commit.
+
+### Why Phase 16 stays unchecked in IMPLEMENTATION-STATUS
+
+The §16 DoD requires all 10 PRD-§19 criteria verified plus a
+RELEASE-NOTES.md and a tagged release. The artifacts above unlock 6/10
+of those criteria (§8.1 perf targets, §7 archive backend correctness via
+the bats suite, §10 client asset size which Phase 12 already
+established, §12 light/dark toggle, §7.4.4 custom facet persistence,
+§3.2 zero-build-step deploy). The remaining four (#1 7-day soak, #4
+multi-provider archive matrix, #5 Parquet readability against a real
+populated dataset, #6 the under-30-minutes setup) need an operator pass.
+The status box flips when those pass; the PR landing this phase ships
+the tooling needed to run them.
