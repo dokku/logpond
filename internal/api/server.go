@@ -109,6 +109,7 @@ func New(opts Options) *Server {
 	r.Post("/api/admin/retention/run", s.handleRetentionRun)
 	r.Post("/api/archive", s.handleArchive)
 	r.Post("/api/admin/archive/verify", s.handleArchiveVerify)
+	r.Get("/api/admin/archive/capabilities", s.handleArchiveCapabilities)
 	r.Get("/api/jobs/{id}", s.handleGetJob)
 
 	return s

@@ -27,6 +27,10 @@ func (f *fakeBackend) Capabilities() archive.Capabilities {
 	return archive.Capabilities{Archive: true, Retrieve: true, Verify: true, Name: "fake"}
 }
 
+func (f *fakeBackend) CapabilityDetail() archive.CapabilityDetail {
+	return archive.CapabilityDetail{Backend: "fake", Archive: "yes", Retrieve: "yes", Verify: "yes"}
+}
+
 func (f *fakeBackend) Archive(_ context.Context, ref archive.SegmentRef) (archive.ArchiveResult, error) {
 	f.calls = append(f.calls, ref.ID)
 	if f.failNext {

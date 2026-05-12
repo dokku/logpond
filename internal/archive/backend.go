@@ -28,7 +28,9 @@ type SegmentRef struct {
 }
 
 // ArchiveResult records what the backend stored. Catalog fields are
-// populated from these values via Catalog.MarkSegmentArchived.
+// populated from these values via Catalog.MarkSegmentArchived. Stdout
+// and Stderr are populated by the script backend; the S3 backend leaves
+// them empty.
 type ArchiveResult struct {
 	S3URL          string // populated by the S3 backend
 	ArchiveRef     string // populated by the script backend
@@ -36,6 +38,8 @@ type ArchiveResult struct {
 	ParquetSHA256  string // mirrored from the segment ref or recomputed
 	AlreadyPresent bool   // true when the backend short-circuited an existing copy
 	Manifest       segments.Manifest
+	Stdout         string
+	Stderr         string
 }
 
 // VerifyResult is the union type returned by Verify across backends.
@@ -51,6 +55,11 @@ type VerifyResult struct {
 	DanglingManifests  []string `json:"dangling_manifests,omitempty"`
 	MissingParquets    []string `json:"missing_parquets,omitempty"`
 	MismatchedChecksum []string `json:"mismatched_checksum,omitempty"`
+
+	// Stdout/Stderr aggregate the script backend's captured output for
+	// the admin UI / jobs row. Empty for the S3 backend.
+	Stdout string `json:"-"`
+	Stderr string `json:"-"`
 }
 
 // VerifyFailed is the per-segment failure shape for the script backend.
@@ -70,11 +79,22 @@ type Capabilities struct {
 	Name     string // "s3", "script", or "none"
 }
 
+// CapabilityDetail is the admin-facing per-mode probe state. Values are
+// "yes" / "no" / "unknown" (script backend only emits "unknown" when
+// probe couldn't determine availability up front).
+type CapabilityDetail struct {
+	Backend  string `json:"backend"`
+	Archive  string `json:"archive"`
+	Retrieve string `json:"retrieve"`
+	Verify   string `json:"verify"`
+}
+
 // Backend is the off-disk archive contract. Implementations must be
 // safe for concurrent calls; serialization (one invocation at a time)
 // is the caller's responsibility when required.
 type Backend interface {
 	Capabilities() Capabilities
+	CapabilityDetail() CapabilityDetail
 	Archive(ctx context.Context, ref SegmentRef) (ArchiveResult, error)
 	Retrieve(ctx context.Context, ref SegmentRef, outDir string) (RetrieveResult, error)
 	Verify(ctx context.Context, segIDs []string) (VerifyResult, error)
@@ -85,6 +105,8 @@ type RetrieveResult struct {
 	ParquetPath  string
 	ManifestPath string
 	Manifest     segments.Manifest
+	Stdout       string
+	Stderr       string
 }
 
 // ErrUnsupported is returned by backends for modes they don't implement
@@ -104,6 +126,11 @@ type NoneBackend struct{}
 // Capabilities implements Backend.
 func (NoneBackend) Capabilities() Capabilities {
 	return Capabilities{Name: "none"}
+}
+
+// CapabilityDetail implements Backend.
+func (NoneBackend) CapabilityDetail() CapabilityDetail {
+	return CapabilityDetail{Backend: "none", Archive: "no", Retrieve: "no", Verify: "no"}
 }
 
 // Archive implements Backend.

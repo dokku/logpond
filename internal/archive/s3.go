@@ -112,6 +112,11 @@ func (b *S3Backend) Capabilities() Capabilities {
 	return Capabilities{Archive: true, Retrieve: true, Verify: true, Name: "s3"}
 }
 
+// CapabilityDetail implements Backend.
+func (b *S3Backend) CapabilityDetail() CapabilityDetail {
+	return CapabilityDetail{Backend: "s3", Archive: "yes", Retrieve: "yes", Verify: "yes"}
+}
+
 // parquetKey returns the object key used for the parquet file. The
 // layout matches PRD §7.9.2.
 func (b *S3Backend) parquetKey(ref SegmentRef) string {

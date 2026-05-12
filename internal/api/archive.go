@@ -149,8 +149,16 @@ func (s *Server) selectArchiveCandidates(ctx context.Context, req archiveRequest
 }
 
 func (s *Server) runArchiveJob(ctx context.Context, jobID string, segs []catalog.Segment) error {
+	var stdoutAcc, stderrAcc string
+	flushOutput := func() {
+		if stdoutAcc == "" && stderrAcc == "" {
+			return
+		}
+		_ = s.jobs.AttachScriptOutput(ctx, jobID, stdoutAcc, stderrAcc)
+	}
 	for i, seg := range segs {
 		if err := ctx.Err(); err != nil {
+			flushOutput()
 			return err
 		}
 		parquetSHA := ""
@@ -169,7 +177,10 @@ func (s *Server) runArchiveJob(ctx context.Context, jobID string, segs []catalog
 			SourceNames:   sources,
 		}
 		res, err := s.archiveBackend.Archive(ctx, ref)
+		stdoutAcc = appendSegmentBlock(stdoutAcc, seg.ID, res.Stdout)
+		stderrAcc = appendSegmentBlock(stderrAcc, seg.ID, res.Stderr)
 		if err != nil {
+			flushOutput()
 			return fmt.Errorf("segment %s: %w", seg.ID, err)
 		}
 		if err := s.catalog.MarkSegmentArchived(ctx, seg.ID, catalog.ArchiveUpdate{
@@ -178,6 +189,7 @@ func (s *Server) runArchiveJob(ctx context.Context, jobID string, segs []catalog
 			ManifestSHA256: res.ManifestSHA256,
 			ParquetSHA256:  res.ParquetSHA256,
 		}); err != nil {
+			flushOutput()
 			return fmt.Errorf("segment %s catalog update: %w", seg.ID, err)
 		}
 		_ = s.jobs.UpdateProgress(ctx, jobID, jobs.Progress{
@@ -185,7 +197,18 @@ func (s *Server) runArchiveJob(ctx context.Context, jobID string, segs []catalog
 			Total:     len(segs),
 		})
 	}
+	flushOutput()
 	return nil
+}
+
+func appendSegmentBlock(existing, id, addition string) string {
+	if addition == "" {
+		return existing
+	}
+	if existing == "" {
+		return "--- " + id + " ---\n" + addition
+	}
+	return existing + "\n--- " + id + " ---\n" + addition
 }
 
 func decodeSourceNames(ns sql.NullString) []string {
@@ -232,10 +255,27 @@ func (s *Server) handleArchiveVerify(w http.ResponseWriter, r *http.Request) {
 
 	result, err := s.archiveBackend.Verify(r.Context(), req.SegmentIDs)
 	if err != nil {
+		if errors.Is(err, archive.ErrUnsupported) {
+			writeError(w, http.StatusNotImplemented, "verify_unsupported",
+				"backend reports verify unavailable", nil)
+			return
+		}
 		writeError(w, http.StatusServiceUnavailable, caps.Name+"_unavailable", err.Error(), nil)
 		return
 	}
 	writeJSON(w, http.StatusOK, result)
+}
+
+// handleArchiveCapabilities serves GET /api/admin/archive/capabilities,
+// surfacing per-mode availability for the configured backend. The script
+// backend's "unknown" state appears when the operator's script didn't
+// implement --probe (PRD §7.9.3).
+func (s *Server) handleArchiveCapabilities(w http.ResponseWriter, r *http.Request) {
+	if s.archiveBackend == nil {
+		writeJSON(w, http.StatusOK, archive.CapabilityDetail{Backend: "none", Archive: "no", Retrieve: "no", Verify: "no"})
+		return
+	}
+	writeJSON(w, http.StatusOK, s.archiveBackend.CapabilityDetail())
 }
 
 func (s *Server) handleGetJob(w http.ResponseWriter, r *http.Request) {

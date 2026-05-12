@@ -353,11 +353,36 @@ func buildArchiveBackend(ctx context.Context, cfg *config.Config, logger *slog.L
 			Logger: logger,
 		})
 	case "script":
-		// Phase 9 implements the script backend; until then, fall back to
-		// none so the binary still boots with `backend: script` in the
-		// config without surfacing wiring errors.
-		logger.Warn("archive: script backend not yet implemented; using none")
-		return archive.NoneBackend{}, nil
+		if cfg.Archive.Script.Path == "" {
+			return nil, fmt.Errorf("archive.script.path is required when archive.backend=script")
+		}
+		timeout := archive.DefaultScriptTimeout
+		if cfg.Archive.Script.Timeout != "" {
+			d, err := config.ParseDuration(cfg.Archive.Script.Timeout)
+			if err != nil {
+				return nil, fmt.Errorf("parsing archive.script.timeout: %w", err)
+			}
+			if d > 0 {
+				timeout = d
+			}
+		}
+		workDir := filepath.Join(cfg.DataDir, "script-work")
+		be, err := archive.NewScriptBackend(archive.ScriptOptions{
+			Path:    cfg.Archive.Script.Path,
+			Timeout: timeout,
+			Env:     cfg.Archive.Script.Env,
+			WorkDir: workDir,
+			Logger:  logger,
+		})
+		if err != nil {
+			return nil, err
+		}
+		probeCtx, cancel := context.WithTimeout(ctx, timeout+30*time.Second)
+		defer cancel()
+		if err := be.Probe(probeCtx); err != nil {
+			logger.Warn("archive: script probe failed; continuing with defaults", "err", err)
+		}
+		return be, nil
 	default:
 		return nil, fmt.Errorf("unsupported archive backend %q", cfg.Archive.Backend)
 	}

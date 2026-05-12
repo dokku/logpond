@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -23,10 +24,12 @@ import (
 // fakeBackend mirrors the retention test fake but specialized for the
 // archive endpoint expectations.
 type fakeBackend struct {
-	caps     archive.Capabilities
-	archived []string
-	failNext bool
-	verify   archive.VerifyResult
+	caps          archive.Capabilities
+	archived      []string
+	failNext      bool
+	verify        archive.VerifyResult
+	archiveStdout string
+	archiveStderr string
 }
 
 func (f *fakeBackend) Capabilities() archive.Capabilities {
@@ -34,6 +37,17 @@ func (f *fakeBackend) Capabilities() archive.Capabilities {
 		return archive.Capabilities{Archive: true, Retrieve: true, Verify: true, Name: "s3"}
 	}
 	return f.caps
+}
+
+func (f *fakeBackend) CapabilityDetail() archive.CapabilityDetail {
+	c := f.Capabilities()
+	tri := func(v bool) string {
+		if v {
+			return "yes"
+		}
+		return "no"
+	}
+	return archive.CapabilityDetail{Backend: c.Name, Archive: tri(c.Archive), Retrieve: tri(c.Retrieve), Verify: tri(c.Verify)}
 }
 
 func (f *fakeBackend) Archive(_ context.Context, ref archive.SegmentRef) (archive.ArchiveResult, error) {
@@ -45,6 +59,8 @@ func (f *fakeBackend) Archive(_ context.Context, ref archive.SegmentRef) (archiv
 	return archive.ArchiveResult{
 		S3URL:         "s3://bkt/seg/" + ref.ID + ".parquet",
 		ParquetSHA256: ref.ParquetSHA256,
+		Stdout:        f.archiveStdout,
+		Stderr:        f.archiveStderr,
 	}, nil
 }
 
@@ -223,6 +239,60 @@ func TestArchiveVerify_PassesThroughBackend(t *testing.T) {
 	if got.Scanned != 10 || len(got.OrphanedParquets) != 1 {
 		t.Fatalf("verify body: %+v", got)
 	}
+}
+
+func TestArchiveCapabilities_PassesThroughBackend(t *testing.T) {
+	srv, _, be := newArchiveServer(t)
+	be.caps = archive.Capabilities{Name: "script", Archive: true, Retrieve: false, Verify: true}
+	req := httptest.NewRequest(http.MethodGet, "/api/admin/archive/capabilities", nil)
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status: %d body=%s", rr.Code, rr.Body.String())
+	}
+	var got archive.CapabilityDetail
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Backend != "script" || got.Archive != "yes" || got.Retrieve != "no" || got.Verify != "yes" {
+		t.Fatalf("capabilities: %+v", got)
+	}
+}
+
+func TestArchiveJob_AttachesScriptOutput(t *testing.T) {
+	srv, cat, be := newArchiveServer(t)
+	dir := t.TempDir()
+	_ = insertSealedSegment(t, cat, "seg-out", 24*time.Hour, dir)
+	be.archiveStdout = "uploaded ok"
+	be.archiveStderr = "warn: retry"
+
+	rr := postJSON(t, srv, "/api/archive", `{"segment_id":"seg-out"}`)
+	if rr.Code != http.StatusAccepted {
+		t.Fatalf("status: %d body=%s", rr.Code, rr.Body.String())
+	}
+	var resp archiveResponse
+	_ = json.Unmarshal(rr.Body.Bytes(), &resp)
+
+	// Poll the jobs row for completion.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		req := httptest.NewRequest(http.MethodGet, "/api/jobs/"+resp.JobID, nil)
+		w := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(w, req)
+		var view jobs.JobView
+		_ = json.Unmarshal(w.Body.Bytes(), &view)
+		if view.State == catalog.JobStateCompleted {
+			if view.ScriptStdout == nil || !strings.Contains(*view.ScriptStdout, "uploaded ok") {
+				t.Fatalf("stdout not attached: %+v", view.ScriptStdout)
+			}
+			if view.ScriptStderr == nil || !strings.Contains(*view.ScriptStderr, "warn: retry") {
+				t.Fatalf("stderr not attached: %+v", view.ScriptStderr)
+			}
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("job did not complete")
 }
 
 func TestJobs_GetReturnsState(t *testing.T) {

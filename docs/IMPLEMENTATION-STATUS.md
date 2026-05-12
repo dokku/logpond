@@ -11,7 +11,7 @@ Tracks progress against `IMPLEMENTATION-PLAN.md`.
 - [x] Phase 6 — Facets and autocomplete
 - [x] Phase 7 — Retention
 - [x] Phase 8 — Archive backend interface + S3 implementation
-- [ ] Phase 9 — Script archive backend
+- [x] Phase 9 — Script archive backend
 - [ ] Phase 10 — Rehydration and sideload
 - [ ] Phase 11 — Live tail (WebSocket)
 - [ ] Phase 12 — Web UI (HTMX + Alpine + Open Props)

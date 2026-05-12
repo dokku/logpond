@@ -352,3 +352,95 @@ The defaults match the PRD.
 with a warning when `archive.backend: script` is set. The HTTP
 endpoints still return clean 501/503 responses in that state. Phase 9
 will swap in the real script backend.
+
+## Phase 9 — Script archive backend
+
+### Test fixture is a bash script, not a Go subprocess
+
+- **Plan text (Phase 9, task 7).** "Use a test fixture script (a Go
+  program built at test time) as the script backend."
+- **What ships.** `internal/archive/script_test.go` writes a small
+  bash fixture into the test's temp dir. The fixture reads `FIXTURE_*`
+  env vars to flip exit code, stdout/stderr, sleep duration,
+  SIGTERM-handling, and per-mode probe responses.
+
+A bash fixture is ~80 lines and compiles instantly per `t.TempDir()`;
+the Go-subprocess approach would have required a `TestMain` shim
+(`if os.Getenv("AS_FIXTURE") != "" { ... }`) plus its own argument
+parser. The bash fixture is line-traceable, scriptable per-test
+(every test sets exactly the env knobs it needs), and has no
+`go test` build dependency. `bash` is a baseline assumption for the
+script backend itself, so requiring it in tests doesn't widen the
+matrix. `TestScript_NeedsBash` documents the fallback should we ever
+need to skip on a minimal CI image.
+
+### Probe defaults: archive=yes, others=unknown
+
+PRD §7.9.3 says: "If `--probe` isn't implemented (script exits non-0
+with no specific code), default to `archive=yes, verify=unknown,
+retrieve=unknown` and let the operator discover unsupported modes
+lazily."
+
+We model "unknown" as a tri-state internally (`capUnknown`, `capYes`,
+`capNo`). `Capabilities()` returns `true` for both `yes` and
+`unknown` so the API layer attempts the mode; only an explicit exit-64
+result (from either probe or a real call) flips the cap to `capNo`,
+at which point further attempts fail fast with `ErrUnsupported`.
+
+`CapabilityDetail()` surfaces the tri-state ("yes"/"no"/"unknown") so
+the admin UI can show the operator the actual state. The new
+`GET /api/admin/archive/capabilities` endpoint returns that detail
+JSON: `{"backend":"script","archive":"yes","retrieve":"unknown",
+"verify":"no"}`. This endpoint is **not** in PRD §13 — it was added
+by the Phase 9 plan as an informational admin endpoint, and is
+documented here rather than in the API spec.
+
+### Stdout/stderr capture extends `ArchiveResult`/`RetrieveResult`/`VerifyResult`
+
+The plan calls for capturing stdout/stderr into the `jobs` table.
+Rather than threading a side-channel into the backend interface, the
+three result structs grew optional `Stdout` and `Stderr` string fields.
+S3 leaves them empty; the script backend populates them (capped at
+1MB per stream with an `...[truncated]` marker so a misbehaving script
+can't blow up the jobs row).
+
+`api.runArchiveJob` accumulates per-segment output blocks and calls
+`jobs.Manager.AttachScriptOutput` to write the combined text into
+`script_stdout`/`script_stderr` on the jobs row. Verify aggregates
+output the same way (one block per segment id, separated by
+`--- <id> ---` markers).
+
+### Manifest is written to a per-invocation scratch directory
+
+PRD §7.9.3's archive contract passes a `--manifest-path` to the
+script, but sealed segments don't carry a manifest on disk yet (the
+S3 backend builds and uploads it inline). The script backend writes
+the manifest into `<work_dir>/inv-<random>/segment-<id>.manifest.json`
+before invoking the script and tears the scratch directory down on
+return. `work_dir` defaults to `<data_dir>/script-work/` in
+production (matching PRD §9), and to `t.TempDir()` in tests.
+
+### SIGTERM-then-SIGKILL via `cmd.Cancel` + `cmd.WaitDelay`
+
+Go 1.20+ exposes the exact knobs the PRD wants: `cmd.Cancel = SIGTERM`
+on context expiry, then `cmd.WaitDelay` for the 30s grace before the
+runtime escalates to SIGKILL. Both production and tests use the same
+mechanism; tests shorten the grace via the unexported
+`terminationGrace` field on `ScriptOptions`.
+
+### Concurrency is a single backend-wide mutex
+
+PRD §7.9.3: "One invocation at a time globally." The simplest faithful
+implementation is `sync.Mutex` around the exec call, which serializes
+both probe and real invocations. `TestScript_ConcurrentArchiveSerialized`
+runs two archives concurrently and checks the fixture's log file shows
+strictly paired start/end lines.
+
+### Restic example ships under `examples/archive-restic.sh`
+
+The reference script implements the full §7.9.3 contract (all three
+modes plus `--probe`). It tags each restic snapshot with
+`logpond + segment:<id> + sha:<parquet-sha>` so verify can find by tag
+and retrieve can locate the snapshot id without persisting state on the
+Logpond side beyond `archive_ref`. Smoke-tested with `--probe` for all
+three modes plus an unknown mode (returns 64).

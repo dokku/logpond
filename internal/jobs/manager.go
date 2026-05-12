@@ -167,6 +167,15 @@ func (m *Manager) UpdateProgress(ctx context.Context, id string, p Progress) err
 	return m.catalog.UpdateJob(ctx, id, catalog.JobUpdate{ProgressJSON: &s})
 }
 
+// AttachScriptOutput overwrites the script_stdout/script_stderr columns
+// for the job row. Empty strings clear the corresponding column.
+func (m *Manager) AttachScriptOutput(ctx context.Context, id, stdout, stderr string) error {
+	return m.catalog.UpdateJob(ctx, id, catalog.JobUpdate{
+		ScriptStdout: &stdout,
+		ScriptStderr: &stderr,
+	})
+}
+
 // Complete marks the job as finished successfully.
 func (m *Manager) Complete(ctx context.Context, id string) error {
 	now := m.now().UTC()
