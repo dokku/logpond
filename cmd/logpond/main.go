@@ -7,13 +7,20 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sync"
 	"syscall"
+	"time"
 
+	"github.com/dokku/logpond/internal/api"
 	"github.com/dokku/logpond/internal/catalog"
 	"github.com/dokku/logpond/internal/config"
+	"github.com/dokku/logpond/internal/ingest"
+	"github.com/dokku/logpond/internal/metrics"
 )
 
 var version = "0.0.0-dev"
@@ -78,12 +85,77 @@ func run() error {
 	}
 	logger.Info("catalog ready", "path", catalogPath, "migrations", applied)
 
-	<-ctx.Done()
+	bufCap, err := ringBufferEventCap(cfg.MemoryLimits.RingBuffer)
+	if err != nil {
+		return fmt.Errorf("computing ring buffer capacity: %w", err)
+	}
+	buf := ingest.NewBuffer(bufCap)
+	logger.Info("ring buffer ready", "capacity_events", bufCap, "memory_limit", cfg.MemoryLimits.RingBuffer)
+
+	m := metrics.New(metrics.Options{FillRatio: buf.FillRatio})
+
+	extractors := make(map[string]*ingest.Extractor, len(cfg.Sources))
+	for _, src := range cfg.Sources {
+		extractors[src.Name] = ingest.NewExtractor(ingest.SourceFromConfig(src.Name, src.Extract))
+	}
+
+	flusher := ingest.NewFlusher(buf, time.Second, bufCap, nil, logger)
+
+	srv := api.New(api.Options{
+		Logger:     logger,
+		Buffer:     buf,
+		Metrics:    m,
+		Extractors: extractors,
+	})
+
+	httpServer := &http.Server{
+		Addr:              fmt.Sprintf("%s:%d", cfg.ListenAddress, cfg.Port),
+		Handler:           srv.Handler(),
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		flusher.Run(ctx)
+	}()
+
+	wg.Add(1)
+	httpErr := make(chan error, 1)
+	go func() {
+		defer wg.Done()
+		ln, err := net.Listen("tcp", httpServer.Addr)
+		if err != nil {
+			httpErr <- err
+			return
+		}
+		logger.Info("http server listening", "addr", ln.Addr().String())
+		if err := httpServer.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			httpErr <- err
+		}
+	}()
+
+	select {
+	case <-ctx.Done():
+	case err := <-httpErr:
+		cancel()
+		wg.Wait()
+		return fmt.Errorf("http server: %w", err)
+	}
+
 	if err := context.Cause(ctx); err != nil && !errors.Is(err, context.Canceled) {
 		logger.Info("shutting down", "cause", err)
 	} else {
 		logger.Info("shutting down")
 	}
+
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer shutdownCancel()
+	if err := httpServer.Shutdown(shutdownCtx); err != nil {
+		logger.Warn("http shutdown", "err", err)
+	}
+	wg.Wait()
 	return nil
 }
 
@@ -94,4 +166,29 @@ func newLogger(level string) *slog.Logger {
 	}
 	h := slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: lvl})
 	return slog.New(h)
+}
+
+// ringBufferEventCap converts the configured ring-buffer memory limit
+// to an event count using a 1KB-per-event heuristic. See
+// docs/IMPLEMENTATION-NOTES.md for the rationale.
+func ringBufferEventCap(memoryLimit string) (int, error) {
+	bytes, err := config.ParseSize(memoryLimit)
+	if err != nil {
+		return 0, fmt.Errorf("parsing %q: %w", memoryLimit, err)
+	}
+	if bytes <= 0 {
+		bytes = 50 << 20 // 50MB default
+	}
+	const bytesPerEvent = 1024
+	n := bytes / bytesPerEvent
+	if n < 1 {
+		n = 1
+	}
+	// Guard against absurdly large configurations that would happily
+	// allocate a multi-million-element slice up front.
+	const hardCap = 1_000_000
+	if n > hardCap {
+		n = hardCap
+	}
+	return int(n), nil
 }

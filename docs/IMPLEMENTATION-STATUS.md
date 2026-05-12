@@ -4,7 +4,7 @@ Tracks progress against `IMPLEMENTATION-PLAN.md`.
 
 - [x] Phase 0 — Project bootstrap
 - [x] Phase 1 — Catalog and config
-- [ ] Phase 2 — Ingest path
+- [x] Phase 2 — Ingest path
 - [ ] Phase 3 — Segment lifecycle (active + sealing)
 - [ ] Phase 4 — Filter tree + canonical query API
 - [ ] Phase 5 — Datadog-style search parser
