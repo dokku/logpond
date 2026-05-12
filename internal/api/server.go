@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dokku/logpond/internal/facets"
 	"github.com/dokku/logpond/internal/ingest"
 	"github.com/dokku/logpond/internal/metrics"
 	"github.com/dokku/logpond/internal/query"
@@ -30,13 +31,15 @@ const maxDecompressedBody = 32 << 20 // 32MB
 // Server wires extractors, the ring buffer, and the metrics handles to
 // the chi router.
 type Server struct {
-	router       chi.Router
-	logger       *slog.Logger
-	buffer       *ingest.Buffer
-	metrics      *Metrics
-	extractors   map[string]*ingest.Extractor
-	executor     *query.Executor
-	maxTimeRange time.Duration
+	router          chi.Router
+	logger          *slog.Logger
+	buffer          *ingest.Buffer
+	metrics         *Metrics
+	extractors      map[string]*ingest.Extractor
+	executor        *query.Executor
+	facets          *facets.Registry
+	maxTimeRange    time.Duration
+	facetSampleSize int
 }
 
 // Metrics is the subset of the central metrics struct that the API
@@ -46,12 +49,14 @@ type Metrics = metrics.Metrics
 
 // Options bundles construction parameters.
 type Options struct {
-	Logger       *slog.Logger
-	Buffer       *ingest.Buffer
-	Metrics      *Metrics
-	Extractors   map[string]*ingest.Extractor
-	Executor     *query.Executor
-	MaxTimeRange time.Duration
+	Logger          *slog.Logger
+	Buffer          *ingest.Buffer
+	Metrics         *Metrics
+	Extractors      map[string]*ingest.Extractor
+	Executor        *query.Executor
+	Facets          *facets.Registry
+	MaxTimeRange    time.Duration
+	FacetSampleSize int
 }
 
 // New builds a Server with all currently-implemented routes registered.
@@ -64,19 +69,27 @@ func New(opts Options) *Server {
 	r.Use(middleware.Recoverer)
 
 	s := &Server{
-		router:       r,
-		logger:       opts.Logger,
-		buffer:       opts.Buffer,
-		metrics:      opts.Metrics,
-		extractors:   opts.Extractors,
-		executor:     opts.Executor,
-		maxTimeRange: opts.MaxTimeRange,
+		router:          r,
+		logger:          opts.Logger,
+		buffer:          opts.Buffer,
+		metrics:         opts.Metrics,
+		extractors:      opts.Extractors,
+		executor:        opts.Executor,
+		facets:          opts.Facets,
+		maxTimeRange:    opts.MaxTimeRange,
+		facetSampleSize: opts.FacetSampleSize,
 	}
 
 	r.Get("/healthz", s.handleHealthz)
 	r.Post("/ingest/{source_name}", s.handleIngest)
 	r.Post("/api/query", s.handleQuery)
+	r.Post("/api/query/count", s.handleQueryCount)
 	r.Post("/api/parse-query", s.handleParseQuery)
+	r.Post("/api/search-suggest", s.handleSearchSuggest)
+	r.Get("/api/facets", s.handleListFacets)
+	r.Post("/api/facets", s.handleCreateFacet)
+	r.Patch("/api/facets/{name}", s.handlePatchFacet)
+	r.Delete("/api/facets/{name}", s.handleDeleteFacet)
 
 	return s
 }

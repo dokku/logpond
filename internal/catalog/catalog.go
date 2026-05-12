@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -299,6 +300,138 @@ func (c *Catalog) ListSegmentsByState(ctx context.Context, state string) ([]Segm
 		out = append(out, s)
 	}
 	return out, rows.Err()
+}
+
+// CustomFacetSourceConfig marks rows that originated from the static
+// YAML config; CustomFacetSourceUI marks rows that the operator added
+// at runtime via the Admin API.
+const (
+	CustomFacetSourceConfig = "config"
+	CustomFacetSourceUI     = "ui"
+)
+
+// CustomFacet mirrors a row in the custom_facets table.
+type CustomFacet struct {
+	Name           string
+	Field          string
+	DisplayLabel   sql.NullString
+	CardinalityCap sql.NullInt64
+	ValueType      string
+	Source         string
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
+}
+
+const customFacetColumns = `name, field, display_label, cardinality_cap, value_type, source, created_at, updated_at`
+
+// ListCustomFacets returns every row in the custom_facets table ordered
+// by created_at ascending so the registry preserves insertion order.
+func (c *Catalog) ListCustomFacets(ctx context.Context) ([]CustomFacet, error) {
+	rows, err := c.db.QueryContext(ctx, `SELECT `+customFacetColumns+` FROM custom_facets ORDER BY created_at ASC`)
+	if err != nil {
+		return nil, fmt.Errorf("listing custom facets: %w", err)
+	}
+	defer rows.Close()
+	var out []CustomFacet
+	for rows.Next() {
+		f, err := scanCustomFacet(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, f)
+	}
+	return out, rows.Err()
+}
+
+// GetCustomFacet returns the row with the given name. Returns
+// sql.ErrNoRows when no such facet exists.
+func (c *Catalog) GetCustomFacet(ctx context.Context, name string) (CustomFacet, error) {
+	row := c.db.QueryRowContext(ctx, `SELECT `+customFacetColumns+` FROM custom_facets WHERE name = ?`, name)
+	return scanCustomFacet(row)
+}
+
+// InsertCustomFacet writes a new custom_facets row. CreatedAt and
+// UpdatedAt default to time.Now().UTC() when zero.
+func (c *Catalog) InsertCustomFacet(ctx context.Context, f CustomFacet) error {
+	now := time.Now().UTC()
+	if f.CreatedAt.IsZero() {
+		f.CreatedAt = now
+	}
+	if f.UpdatedAt.IsZero() {
+		f.UpdatedAt = now
+	}
+	if f.ValueType == "" {
+		f.ValueType = "string"
+	}
+	_, err := c.db.ExecContext(ctx, `INSERT INTO custom_facets(
+        name, field, display_label, cardinality_cap, value_type, source, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		f.Name, f.Field, f.DisplayLabel, f.CardinalityCap, f.ValueType, f.Source,
+		f.CreatedAt.UTC(), f.UpdatedAt.UTC(),
+	)
+	if err != nil {
+		return fmt.Errorf("inserting custom facet %s: %w", f.Name, err)
+	}
+	return nil
+}
+
+// CustomFacetUpdate carries patchable fields for a PATCH-style call.
+// Nil pointers mean "leave the column unchanged".
+type CustomFacetUpdate struct {
+	DisplayLabel   *string
+	CardinalityCap *int64
+}
+
+// UpdateCustomFacet applies u to the row named name. Returns
+// sql.ErrNoRows when no such facet exists.
+func (c *Catalog) UpdateCustomFacet(ctx context.Context, name string, u CustomFacetUpdate) (CustomFacet, error) {
+	now := time.Now().UTC()
+	setParts := []string{"updated_at = ?"}
+	args := []any{now}
+	if u.DisplayLabel != nil {
+		setParts = append(setParts, "display_label = ?")
+		args = append(args, sql.NullString{String: *u.DisplayLabel, Valid: *u.DisplayLabel != ""})
+	}
+	if u.CardinalityCap != nil {
+		setParts = append(setParts, "cardinality_cap = ?")
+		args = append(args, sql.NullInt64{Int64: *u.CardinalityCap, Valid: *u.CardinalityCap > 0})
+	}
+	args = append(args, name)
+	q := `UPDATE custom_facets SET ` + strings.Join(setParts, ", ") + ` WHERE name = ?`
+	res, err := c.db.ExecContext(ctx, q, args...)
+	if err != nil {
+		return CustomFacet{}, fmt.Errorf("updating custom facet %s: %w", name, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return CustomFacet{}, err
+	}
+	if n == 0 {
+		return CustomFacet{}, sql.ErrNoRows
+	}
+	return c.GetCustomFacet(ctx, name)
+}
+
+// DeleteCustomFacet removes the row named name. Returns false when no
+// such facet exists.
+func (c *Catalog) DeleteCustomFacet(ctx context.Context, name string) (bool, error) {
+	res, err := c.db.ExecContext(ctx, `DELETE FROM custom_facets WHERE name = ?`, name)
+	if err != nil {
+		return false, fmt.Errorf("deleting custom facet %s: %w", name, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
+func scanCustomFacet(r rowScanner) (CustomFacet, error) {
+	var f CustomFacet
+	if err := r.Scan(&f.Name, &f.Field, &f.DisplayLabel, &f.CardinalityCap, &f.ValueType, &f.Source, &f.CreatedAt, &f.UpdatedAt); err != nil {
+		return CustomFacet{}, err
+	}
+	return f, nil
 }
 
 // AppliedMigrations returns the versions recorded in the migrations

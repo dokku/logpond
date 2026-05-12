@@ -19,6 +19,7 @@ import (
 	"github.com/dokku/logpond/internal/api"
 	"github.com/dokku/logpond/internal/catalog"
 	"github.com/dokku/logpond/internal/config"
+	"github.com/dokku/logpond/internal/facets"
 	"github.com/dokku/logpond/internal/ingest"
 	"github.com/dokku/logpond/internal/metrics"
 	"github.com/dokku/logpond/internal/query"
@@ -149,13 +150,23 @@ func run() error {
 	}
 	executor := query.NewExecutor(cat, mgr, logger)
 
+	facetRegistry := facets.New(facets.Options{Catalog: cat, Logger: logger})
+	if err := facetRegistry.Load(ctx, cfg); err != nil {
+		return fmt.Errorf("loading facets: %w", err)
+	}
+	for _, warn := range facetRegistry.Warnings() {
+		logger.Warn("facet registry warning", "msg", warn)
+	}
+
 	srv := api.New(api.Options{
-		Logger:       logger,
-		Buffer:       buf,
-		Metrics:      m,
-		Extractors:   extractors,
-		Executor:     executor,
-		MaxTimeRange: maxTimeRange,
+		Logger:          logger,
+		Buffer:          buf,
+		Metrics:         m,
+		Extractors:      extractors,
+		Executor:        executor,
+		Facets:          facetRegistry,
+		MaxTimeRange:    maxTimeRange,
+		FacetSampleSize: cfg.Facets.SegmentSampleSize,
 	})
 
 	httpServer := &http.Server{

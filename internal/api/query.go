@@ -32,10 +32,23 @@ type timeRange struct {
 }
 
 type queryResponse struct {
-	Events     []eventDTO     `json:"events"`
-	NextCursor string         `json:"next_cursor,omitempty"`
-	Stats      statsDTO       `json:"stats"`
-	Facets     map[string]any `json:"facets"`
+	Events     []eventDTO          `json:"events"`
+	NextCursor string              `json:"next_cursor,omitempty"`
+	Stats      statsDTO            `json:"stats"`
+	Facets     map[string]facetDTO `json:"facets"`
+}
+
+type facetDTO struct {
+	Values         []facetValueDTO `json:"values"`
+	CardinalityCap int             `json:"cardinality_cap"`
+	Truncated      bool            `json:"truncated"`
+	TruncatedCount int             `json:"truncated_count,omitempty"`
+	SampleSegments int             `json:"sample_segments"`
+}
+
+type facetValueDTO struct {
+	Value string `json:"value"`
+	Count int64  `json:"count"`
 }
 
 type eventDTO struct {
@@ -135,15 +148,24 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	specs, unknown := s.resolveFacetSpecs(req.Facets)
+	if len(unknown) > 0 {
+		writeError(w, http.StatusBadRequest, "bad_request",
+			fmt.Sprintf("unknown facets: %v", unknown), map[string]any{"unknown": unknown})
+		return
+	}
+
 	resp, err := s.executor.Run(r.Context(), query.Request{
-		From:         req.TimeRange.From.UTC(),
-		To:           req.TimeRange.To.UTC(),
-		Filter:       root,
-		Search:       search,
-		Sort:         req.Sort,
-		Limit:        req.Limit,
-		Cursor:       req.Cursor,
-		MaxTimeRange: s.maxTimeRange,
+		From:            req.TimeRange.From.UTC(),
+		To:              req.TimeRange.To.UTC(),
+		Filter:          root,
+		Search:          search,
+		Sort:            req.Sort,
+		Limit:           req.Limit,
+		Cursor:          req.Cursor,
+		MaxTimeRange:    s.maxTimeRange,
+		Facets:          specs,
+		FacetSampleSize: s.facetSampleSize,
 	})
 	if err != nil {
 		s.writeQueryError(w, err)
@@ -159,12 +181,62 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 			SegmentsRead: resp.Stats.SegmentsRead,
 			DurationMs:   resp.Stats.DurationMs,
 		},
-		Facets: map[string]any{},
+		Facets: map[string]facetDTO{},
 	}
 	for _, ev := range resp.Events {
 		out.Events = append(out.Events, toEventDTO(ev))
 	}
+	for name, fr := range resp.Facets {
+		out.Facets[name] = toFacetDTO(fr)
+	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// resolveFacetSpecs maps facet names into executor-ready specs using
+// the registry. An empty `requested` list expands to "all facets"
+// (§13.4: the response includes all configured facets when the request
+// omits `facets`). Unknown names are returned for a 400 reply.
+func (s *Server) resolveFacetSpecs(requested []string) ([]query.FacetSpec, []string) {
+	if s.facets == nil {
+		return nil, nil
+	}
+	if len(requested) == 0 {
+		all := s.facets.List()
+		out := make([]query.FacetSpec, 0, len(all))
+		for _, d := range all {
+			out = append(out, query.FacetSpec{
+				Name: d.Name, Field: d.Field, CardinalityCap: d.CardinalityCap,
+			})
+		}
+		return out, nil
+	}
+	out := make([]query.FacetSpec, 0, len(requested))
+	var unknown []string
+	for _, name := range requested {
+		d, ok := s.facets.Get(name)
+		if !ok {
+			unknown = append(unknown, name)
+			continue
+		}
+		out = append(out, query.FacetSpec{
+			Name: d.Name, Field: d.Field, CardinalityCap: d.CardinalityCap,
+		})
+	}
+	return out, unknown
+}
+
+func toFacetDTO(fr query.FacetResult) facetDTO {
+	values := make([]facetValueDTO, 0, len(fr.Values))
+	for _, v := range fr.Values {
+		values = append(values, facetValueDTO{Value: v.Value, Count: v.Count})
+	}
+	return facetDTO{
+		Values:         values,
+		CardinalityCap: fr.CardinalityCap,
+		Truncated:      fr.Truncated,
+		TruncatedCount: fr.TruncatedCount,
+		SampleSegments: fr.SampleSegments,
+	}
 }
 
 func (s *Server) writeQueryError(w http.ResponseWriter, err error) {

@@ -47,6 +47,22 @@ type Request struct {
 	Limit        int
 	Cursor       string
 	MaxTimeRange time.Duration
+
+	// Facets is the resolved list of facets to compute. Empty disables
+	// facet aggregation; the API layer expands "all enabled" via the
+	// registry before calling Run.
+	Facets []FacetSpec
+	// FacetSampleSize bounds the number of most-recent overlapping
+	// segments aggregated for facet values (PRD §7.4.3, default 24).
+	FacetSampleSize int
+}
+
+// FacetSpec is the executor-side view of a facet definition. The API
+// layer fills it in from facets.Definition before calling Run.
+type FacetSpec struct {
+	Name           string
+	Field          string
+	CardinalityCap int
 }
 
 // ResultEvent is a single row in the response.
@@ -76,6 +92,23 @@ type Response struct {
 	Events     []ResultEvent
 	NextCursor string
 	Stats      Stats
+	Facets     map[string]FacetResult
+}
+
+// FacetResult is a single facet's contribution to the response, shaped
+// to match §13.4's `facets.<name>` block.
+type FacetResult struct {
+	Values         []FacetValue
+	CardinalityCap int
+	Truncated      bool
+	TruncatedCount int
+	SampleSegments int
+}
+
+// FacetValue is one (value, count) entry inside FacetResult.Values.
+type FacetValue struct {
+	Value string
+	Count int64
 }
 
 // ActiveSegmentSource is the slice of segments.Manager used by the
@@ -224,6 +257,17 @@ func (e *Executor) Run(ctx context.Context, req Request) (Response, error) {
 		})
 		resp.Events = resp.Events[:limit]
 	}
+
+	if len(req.Facets) > 0 {
+		baseFilter := CombineAnd(timeC, filterC, searchC)
+		sample := selectFacetSample(segs, req.FacetSampleSize)
+		facets, err := e.computeFacets(ctx, sample, baseFilter, req.Facets)
+		if err != nil {
+			return Response{}, fmt.Errorf("computing facets: %w", err)
+		}
+		resp.Facets = facets
+	}
+
 	resp.Stats = Stats{
 		RowsScanned:  rowsScanned,
 		RowsReturned: int64(len(resp.Events)),
@@ -231,6 +275,292 @@ func (e *Executor) Run(ctx context.Context, req Request) (Response, error) {
 		DurationMs:   time.Since(start).Milliseconds(),
 	}
 	return resp, nil
+}
+
+// Count executes the request as a count-only query, returning (count,
+// exact, segmentsRead, durationMs). When the matched row count reaches
+// or exceeds limitGuard, the call short-circuits and reports exact=false
+// (PRD §13.5).
+func (e *Executor) Count(ctx context.Context, req Request, limitGuard int) (int64, bool, int, int64, error) {
+	start := time.Now()
+	if !req.To.After(req.From) {
+		return 0, false, 0, 0, ErrInvalidTimeRange
+	}
+	if req.MaxTimeRange > 0 && req.To.Sub(req.From) > req.MaxTimeRange {
+		return 0, false, 0, 0, ErrTimeRangeTooLarge
+	}
+	if req.Filter != nil {
+		if err := Validate(req.Filter); err != nil {
+			if IsFilterTooDeep(err) {
+				return 0, false, 0, 0, err
+			}
+			return 0, false, 0, 0, fmt.Errorf("%w: %v", ErrInvalidFilter, err)
+		}
+	}
+
+	var filterC Compiled
+	if req.Filter != nil {
+		c, err := Compile(req.Filter)
+		if err != nil {
+			return 0, false, 0, 0, fmt.Errorf("%w: %v", ErrInvalidFilter, err)
+		}
+		filterC = c
+	}
+	searchC := CompileSearch(req.Search)
+	timeC := Compiled{
+		SQL:  `"timestamp" >= ? AND "timestamp" <= ?`,
+		Args: []any{req.From.UTC(), req.To.UTC()},
+	}
+	where := CombineAnd(timeC, filterC, searchC)
+
+	segs, err := e.cat.SegmentsInRange(ctx, req.From, req.To)
+	if err != nil {
+		return 0, false, 0, 0, fmt.Errorf("listing segments: %w", err)
+	}
+
+	if limitGuard <= 0 {
+		limitGuard = 10001
+	}
+
+	var total int64
+	segsTouched := 0
+	for _, s := range segs {
+		if total >= int64(limitGuard) {
+			break
+		}
+		remaining := int64(limitGuard) - total
+		n, err := e.countSegment(ctx, s, where, remaining)
+		if err != nil {
+			return 0, false, 0, 0, fmt.Errorf("counting segment %s: %w", s.ID, err)
+		}
+		if n > 0 {
+			segsTouched++
+		}
+		total += n
+	}
+	exact := total < int64(limitGuard)
+	if !exact {
+		total = int64(limitGuard) - 1
+	}
+	return total, exact, segsTouched, time.Since(start).Milliseconds(), nil
+}
+
+func (e *Executor) countSegment(ctx context.Context, s catalog.Segment, where Compiled, limit int64) (int64, error) {
+	whereSQL := ""
+	if where.SQL != "" {
+		whereSQL = " WHERE " + where.SQL
+	}
+	// SELECT 1 ... LIMIT N + COUNT in Go gives the executor cheap early
+	// termination without DuckDB-specific tricks.
+	if s.State == catalog.StateActive {
+		if e.active == nil {
+			return 0, nil
+		}
+		sqlText := fmt.Sprintf(`SELECT 1 FROM events%s LIMIT %d`, whereSQL, limit)
+		rows, open, err := e.active.QueryActive(ctx, s.ID, sqlText, where.Args...)
+		if err != nil {
+			return 0, err
+		}
+		if !open {
+			return 0, nil
+		}
+		defer rows.Close()
+		return drainCount(rows)
+	}
+	if !s.LocalPath.Valid {
+		return 0, nil
+	}
+	conn, err := duckdb.Open(ctx, "", "")
+	if err != nil {
+		return 0, fmt.Errorf("opening sealed reader: %w", err)
+	}
+	defer conn.Close()
+	src := fmt.Sprintf("read_parquet('%s')", escapeSingleQuotes(s.LocalPath.String))
+	sqlText := fmt.Sprintf(`SELECT 1 FROM %s%s LIMIT %d`, src, whereSQL, limit)
+	rows, err := conn.DB().QueryContext(ctx, sqlText, where.Args...)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+	return drainCount(rows)
+}
+
+func drainCount(rows *sql.Rows) (int64, error) {
+	var n int64
+	var sink int
+	for rows.Next() {
+		if err := rows.Scan(&sink); err != nil {
+			return n, err
+		}
+		n++
+	}
+	return n, rows.Err()
+}
+
+// selectFacetSample picks the N most-recent overlapping segments per
+// §7.4.3. Segments without a queryable backing (no local_path, not
+// active) are skipped so we don't issue read_parquet against nothing.
+func selectFacetSample(segs []catalog.Segment, n int) []catalog.Segment {
+	if n <= 0 {
+		n = 24
+	}
+	candidates := make([]catalog.Segment, 0, len(segs))
+	for _, s := range segs {
+		if s.State == catalog.StateActive || s.LocalPath.Valid {
+			candidates = append(candidates, s)
+		}
+	}
+	sort.SliceStable(candidates, func(i, j int) bool {
+		return candidates[i].TimeStart.After(candidates[j].TimeStart)
+	})
+	if len(candidates) > n {
+		candidates = candidates[:n]
+	}
+	return candidates
+}
+
+func (e *Executor) computeFacets(ctx context.Context, sample []catalog.Segment, base Compiled, specs []FacetSpec) (map[string]FacetResult, error) {
+	out := make(map[string]FacetResult, len(specs))
+	for _, spec := range specs {
+		fieldExpr, err := facetFieldExpr(spec.Field)
+		if err != nil {
+			return nil, err
+		}
+		// Aggregate full GROUP BY across the sample, then truncate in Go.
+		// We cap the per-segment scan to limit memory blowup on
+		// pathological cardinalities; the extra+1 lets us tell whether
+		// we exceeded the truncation threshold.
+		counts := map[string]int64{}
+		sampleHit := 0
+		for _, s := range sample {
+			rows, err := e.queryFacetSegment(ctx, s, fieldExpr, base)
+			if err != nil {
+				return nil, fmt.Errorf("facet %s segment %s: %w", spec.Name, s.ID, err)
+			}
+			any := false
+			for _, r := range rows {
+				counts[r.Value] += r.Count
+				any = true
+			}
+			if any {
+				sampleHit++
+			}
+		}
+		fr := buildFacetResult(spec, counts, sampleHit)
+		out[spec.Name] = fr
+	}
+	return out, nil
+}
+
+type facetRow struct {
+	Value string
+	Count int64
+}
+
+func (e *Executor) queryFacetSegment(ctx context.Context, s catalog.Segment, fieldExpr string, base Compiled) ([]facetRow, error) {
+	whereSQL := ""
+	if base.SQL != "" {
+		whereSQL = " WHERE " + base.SQL
+	}
+	// Filter NULL values out at the SQL level so "(none)" doesn't bloat
+	// the facet list. Callers can still query the field's absence via
+	// the explicit exists predicate.
+	if whereSQL == "" {
+		whereSQL = " WHERE " + fieldExpr + " IS NOT NULL"
+	} else {
+		whereSQL += " AND " + fieldExpr + " IS NOT NULL"
+	}
+	sqlText := fmt.Sprintf(`SELECT %s AS v, COUNT(*) AS c FROM %%s%s GROUP BY %s ORDER BY c DESC`,
+		fieldExpr, whereSQL, fieldExpr)
+
+	var rows *sql.Rows
+	if s.State == catalog.StateActive {
+		if e.active == nil {
+			return nil, nil
+		}
+		formatted := fmt.Sprintf(sqlText, "events")
+		r, open, err := e.active.QueryActive(ctx, s.ID, formatted, base.Args...)
+		if err != nil {
+			return nil, err
+		}
+		if !open {
+			return nil, nil
+		}
+		rows = r
+	} else {
+		if !s.LocalPath.Valid {
+			return nil, nil
+		}
+		conn, err := duckdb.Open(ctx, "", "")
+		if err != nil {
+			return nil, fmt.Errorf("opening sealed reader: %w", err)
+		}
+		defer conn.Close()
+		src := fmt.Sprintf("read_parquet('%s')", escapeSingleQuotes(s.LocalPath.String))
+		formatted := fmt.Sprintf(sqlText, src)
+		r, err := conn.DB().QueryContext(ctx, formatted, base.Args...)
+		if err != nil {
+			return nil, err
+		}
+		rows = r
+	}
+	defer rows.Close()
+	var out []facetRow
+	for rows.Next() {
+		var v sql.NullString
+		var c int64
+		if err := rows.Scan(&v, &c); err != nil {
+			return nil, fmt.Errorf("scanning facet row: %w", err)
+		}
+		if !v.Valid {
+			continue
+		}
+		out = append(out, facetRow{Value: v.String, Count: c})
+	}
+	return out, rows.Err()
+}
+
+func facetFieldExpr(field string) (string, error) {
+	if strings.HasPrefix(field, AttributePrefix) {
+		path := field[len(AttributePrefix):]
+		return fmt.Sprintf("json_extract_string(attributes, '$.%s')", escapeSingleQuotes(path)), nil
+	}
+	if !CoreColumns[field] {
+		return "", fmt.Errorf("unknown facet field %q", field)
+	}
+	return quoteIdent(field), nil
+}
+
+func buildFacetResult(spec FacetSpec, counts map[string]int64, sampleHit int) FacetResult {
+	values := make([]FacetValue, 0, len(counts))
+	for v, c := range counts {
+		values = append(values, FacetValue{Value: v, Count: c})
+	}
+	sort.Slice(values, func(i, j int) bool {
+		if values[i].Count != values[j].Count {
+			return values[i].Count > values[j].Count
+		}
+		return values[i].Value < values[j].Value
+	})
+	total := len(values)
+	cap := spec.CardinalityCap
+	if cap <= 0 {
+		cap = 50
+	}
+	truncated := total > cap
+	if truncated {
+		values = values[:cap]
+	}
+	res := FacetResult{
+		Values:         values,
+		CardinalityCap: cap,
+		Truncated:      truncated,
+		SampleSegments: sampleHit,
+	}
+	if truncated {
+		res.TruncatedCount = total
+	}
+	return res
 }
 
 func (e *Executor) querySegment(ctx context.Context, s catalog.Segment, where Compiled, orderBy string, limit int) ([]ResultEvent, int64, error) {

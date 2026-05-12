@@ -181,3 +181,65 @@ from the bare token and uses the remainder as the contains target.
 For `foo*bar` this is imperfect (it matches anything containing
 `foobar` rather than `foo...bar`), but the warning emitted alongside
 flags the imprecision so an operator can refine the query.
+
+## Phase 6 — Facets and autocomplete
+
+### Facet aggregation issues separate queries per segment
+
+- **Plan text (Phase 6, task 2).** "DuckDB's query planner should be
+  able to combine the result-set query and the facet aggregations into
+  a single multi-statement plan; verify by inspecting the explain plan."
+- **What ships.** Facet computation issues one `GROUP BY` query per
+  sampled segment (active or sealed Parquet) and merges counts in Go.
+
+The Phase 4 executor already runs per-segment queries because each
+active segment is locked to its writer connection (see the Phase-4
+note in this file). Reusing the same plumbing for facet aggregation
+keeps the executor consistent and avoids ATTACHing DuckDB files from
+a separate connection. The Go-side merge is bounded by the cardinality
+of the field across the sample window; for the facet truncation cap of
+50 the working-set is tiny in practice. If a future bench shows the
+merge dominating, we can switch to a single multi-statement DuckDB
+plan without changing the public response shape.
+
+### Facet sampling includes active segments
+
+§7.4.3 says facet values come from "the N most recent sealed segments
+overlapping the current query time range." The implementation widens
+that to "the N most recent queryable segments" — active segments
+included — because the freshest values would otherwise lag the
+sealing interval (up to ~1h with the default window). The PRD's
+intent is "values you can discover quickly," not "exclude live data,"
+so adding the active segment in is strictly more useful. Sealed-only
+sampling remains a one-line change if we ever decide otherwise.
+
+### Count short-circuit uses `SELECT 1 ... LIMIT N`
+
+§13.5 specifies `exact: false` once the count reaches 10,001 but
+doesn't say how to short-circuit. The executor scans each segment
+with `SELECT 1 FROM segment WHERE filter LIMIT remaining` and counts
+returned rows. When the running total reaches the guard, the loop
+stops scanning further segments. This avoids any DuckDB-specific
+early-termination tricks and gives portable behaviour across the
+active and sealed-Parquet readers.
+
+### Search-suggest context classifier is hand-rolled
+
+§7.5 / §13.6 enumerate five suggestion contexts but the PRD doesn't
+specify how the server decides which context applies. The
+implementation uses a small backwards-scan classifier on the query
+prefix up to `cursor_pos`. It handles the common cases (start, after
+`field:`, inside `field:(`, after a comma in a value list, after
+whitespace following a complete predicate) and falls back to "field"
+context on ambiguity. The full parser in `internal/query/parser` is
+reserved for executed queries; the suggester only needs a coarse
+state machine and tolerates malformed inputs.
+
+### Facet values for suggestions reuse the executor
+
+`POST /api/search-suggest`'s value context fans through the same
+facet-computation path as the main query, with `CardinalityCap` set
+to `max+1` for the requested suggestion limit. This means the value
+suggestions reflect the current N-segment sample exactly as the
+sidebar will, and we don't need a second SQL surface dedicated to
+suggestions.
