@@ -6,6 +6,7 @@ package api
 
 import (
 	"compress/gzip"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -25,6 +26,7 @@ import (
 	"github.com/dokku/logpond/internal/retention"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 // maxDecompressedBody is the cap on the size of a single ingest body
@@ -52,6 +54,10 @@ type Server struct {
 	rehydrationTTL  time.Duration
 	fanout          *ingest.Fanout
 	liveTail        http.Handler
+	healthCheck     func(ctx context.Context) error
+	reloadHandler   http.HandlerFunc
+	startTime       time.Time
+	version         string
 }
 
 // Metrics is the subset of the central metrics struct that the API
@@ -77,6 +83,17 @@ type Options struct {
 	RehydrationTTL  time.Duration
 	Fanout          *ingest.Fanout
 	LiveTail        http.Handler
+	// HealthCheck is called from GET /healthz. A nil error returns 200
+	// with status=ok; a non-nil error returns 503 with the reason.
+	HealthCheck func(ctx context.Context) error
+	// Reload is the handler bound to POST /api/admin/reload (§13.20).
+	// Wired by main once the reload coordinator is built.
+	Reload http.HandlerFunc
+	// StartTime is used to compute /healthz's uptime field. Defaults to
+	// the moment New is called when zero.
+	StartTime time.Time
+	// Version is reported by /healthz.
+	Version string
 }
 
 // New builds a Server with all currently-implemented routes registered.
@@ -87,6 +104,15 @@ func New(opts Options) *Server {
 	r := chi.NewRouter()
 	r.Use(middleware.RealIP)
 	r.Use(middleware.Recoverer)
+
+	start := opts.StartTime
+	if start.IsZero() {
+		start = time.Now().UTC()
+	}
+	version := opts.Version
+	if version == "" {
+		version = "0.0.0-dev"
+	}
 
 	s := &Server{
 		router:          r,
@@ -106,9 +132,16 @@ func New(opts Options) *Server {
 		rehydrationTTL:  opts.RehydrationTTL,
 		fanout:          opts.Fanout,
 		liveTail:        opts.LiveTail,
+		healthCheck:     opts.HealthCheck,
+		reloadHandler:   opts.Reload,
+		startTime:       start,
+		version:         version,
 	}
 
 	r.Get("/healthz", s.handleHealthz)
+	if opts.Metrics != nil && opts.Metrics.Registry != nil {
+		r.Method(http.MethodGet, "/metrics", promhttp.HandlerFor(opts.Metrics.Registry, promhttp.HandlerOpts{}))
+	}
 	r.Post("/ingest/{source_name}", s.handleIngest)
 	r.Post("/api/query", s.handleQuery)
 	r.Post("/api/query/count", s.handleQueryCount)
@@ -119,6 +152,7 @@ func New(opts Options) *Server {
 	r.Patch("/api/facets/{name}", s.handlePatchFacet)
 	r.Delete("/api/facets/{name}", s.handleDeleteFacet)
 	r.Post("/api/admin/retention/run", s.handleRetentionRun)
+	r.Post("/api/admin/reload", s.handleReload)
 	r.Post("/api/archive", s.handleArchive)
 	r.Post("/api/admin/archive/verify", s.handleArchiveVerify)
 	r.Get("/api/admin/archive/capabilities", s.handleArchiveCapabilities)
@@ -143,8 +177,41 @@ func (s *Server) Handler() http.Handler { return s.router }
 // package to import the ui package.
 func (s *Server) Router() chi.Router { return s.router }
 
+// healthzResponse mirrors PRD §13.24's success body. On 503 we add a
+// `reason` field describing what failed.
+type healthzResponse struct {
+	Status        string `json:"status"`
+	UptimeSeconds int64  `json:"uptime_seconds"`
+	Version       string `json:"version"`
+	Reason        string `json:"reason,omitempty"`
+}
+
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	uptime := int64(time.Since(s.startTime).Seconds())
+	resp := healthzResponse{
+		Status:        "ok",
+		UptimeSeconds: uptime,
+		Version:       s.version,
+	}
+	if s.healthCheck != nil {
+		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+		defer cancel()
+		if err := s.healthCheck(ctx); err != nil {
+			resp.Status = "unhealthy"
+			resp.Reason = err.Error()
+			writeJSON(w, http.StatusServiceUnavailable, resp)
+			return
+		}
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func (s *Server) handleReload(w http.ResponseWriter, r *http.Request) {
+	if s.reloadHandler == nil {
+		writeError(w, http.StatusServiceUnavailable, "internal_error", "reload not configured", nil)
+		return
+	}
+	s.reloadHandler(w, r)
 }
 
 func (s *Server) handleIngest(w http.ResponseWriter, r *http.Request) {

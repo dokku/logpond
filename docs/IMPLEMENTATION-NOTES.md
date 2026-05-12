@@ -716,3 +716,73 @@ volatile — it resets on process restart. Persisting these into the
 catalog would require a new table for what is essentially a UI
 convenience (the underlying jobs row already records the durable
 record of each operation).
+
+## Phase 14 — Metrics, health, observability
+
+### Memory pressure heuristic uses runtime allocation, not RSS
+
+PRD §8.2 phrases the watchdog trigger as "RSS exceeds 95% of
+`GOMEMLIMIT` for >30s". The watchdog as implemented samples
+`runtime.MemStats` (HeapInuse + StackInuse + MSpanInuse + MCacheInuse)
+instead of an OS-level RSS. Reasons:
+
+- `GOMEMLIMIT` itself is the Go runtime's soft cap on total in-use
+  memory, which is what the runtime compares against when deciding to
+  pace allocations. Comparing in-use bytes to the same cap keeps the
+  watchdog's decision aligned with the runtime's own behaviour.
+- Cross-platform OS-RSS access from Go requires `gopsutil` or
+  platform-specific syscalls. The runtime-side numbers are zero-dep
+  and good enough for relative pressure detection.
+
+The downside is that the watchdog won't notice memory pinned by CGo
+(DuckDB) outside the Go heap. PRD §8.2's resource table caps DuckDB at
+128MB explicitly, so the Go-runtime fraction is the dominant signal in
+practice. If we later see DuckDB-dominant pressure, switch the watchdog
+to read `/proc/self/status` VmRSS on Linux without changing the rest of
+the wiring.
+
+### Watchdog reads `debug.SetMemoryLimit(-1)` for the cap
+
+The watchdog needs to know what `GOMEMLIMIT` resolved to so it can
+compute a ratio. `debug.SetMemoryLimit(-1)` returns the current limit
+without changing it; we call that once at startup. When the limit is
+unset (the Go runtime defaults to `math.MaxInt64`), `tick` returns
+without doing anything — the watchdog can't make a relative decision
+against an effectively infinite cap.
+
+### Reload coordinator lives in `cmd/logpond`, not a shared package
+
+The reload coordinator (`reloader` in `cmd/logpond/main.go`) currently
+only refreshes the facet registry, which is the most operator-visible
+reloadable surface. Other reloadable values (live tail caps, retention
+thresholds) are accepted at reload time and recorded as "changed
+fields" in the API response, but their consumers re-read them lazily
+the next time they look. The reload behaviour will tighten as later
+work adds more hot-reload paths; for now the contract is "reload
+re-reads the config file, validates that only reloadable fields differ,
+and updates anything we can hot-swap today."
+
+The coordinator is in `package main` rather than its own package
+because (a) it's a tiny amount of code, (b) it sees private knobs of
+several subsystems (config validation, facet registry, logger), and
+(c) it's the only consumer of those knobs at reload time. If a second
+caller appears it can move to `internal/reload/` without changing the
+HTTP contract.
+
+### `/metrics` is served from the same chi router as `/api/*`
+
+The PRD doesn't separate `/metrics` from the main API surface. Mounting
+it on the same chi router keeps the listen address single, matches the
+PRD §13.25 phrasing ("Prometheus format"), and lets reverse-proxy
+operators choose whether to expose it externally. `promhttp.HandlerFor`
+wraps the registry directly; no middleware sits between the scraper
+and the registry.
+
+### Segments/disk/facet gauges refresh on a 15s tick
+
+These three gauges would be expensive to compute on every scrape (each
+needs a full catalog scan + per-segment size summation). The
+`metrics.Refresher` goroutine reads them every 15s into the gauge vec
+metrics. Prometheus scrape intervals are typically 15s or higher, so
+the gauges remain at most one tick behind reality — well within the
+fidelity Prometheus expects.

@@ -35,6 +35,12 @@ type suggestionItem struct {
 
 func (s *Server) handleSearchSuggest(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
+	start := time.Now()
+	defer func() {
+		if s.metrics != nil {
+			s.metrics.SearchSuggestDuration.Observe(time.Since(start).Seconds())
+		}
+	}()
 	var req suggestRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "bad_request", "invalid JSON: "+err.Error(), nil)

@@ -46,12 +46,22 @@ func TestHealthz_ReturnsOK(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status: %d", rr.Code)
 	}
-	var body map[string]string
+	var body struct {
+		Status        string `json:"status"`
+		UptimeSeconds int64  `json:"uptime_seconds"`
+		Version       string `json:"version"`
+	}
 	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if body["status"] != "ok" {
-		t.Errorf("body: %v", body)
+	if body.Status != "ok" {
+		t.Errorf("status: %s", body.Status)
+	}
+	if body.Version == "" {
+		t.Errorf("version missing")
+	}
+	if body.UptimeSeconds < 0 {
+		t.Errorf("uptime: %d", body.UptimeSeconds)
 	}
 }
 

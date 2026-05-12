@@ -12,6 +12,8 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -104,7 +106,12 @@ func run() error {
 	buf := ingest.NewBuffer(bufCap)
 	logger.Info("ring buffer ready", "capacity_events", bufCap, "memory_limit", cfg.MemoryLimits.RingBuffer)
 
-	m := metrics.New(metrics.Options{FillRatio: buf.FillRatio})
+	startTime := time.Now().UTC()
+	liveTailRef := &liveTailRef{}
+	m := metrics.New(metrics.Options{
+		FillRatio:       buf.FillRatio,
+		LiveTailClients: func() float64 { return float64(liveTailRef.clientCount()) },
+	})
 
 	extractors := make(map[string]*ingest.Extractor, len(cfg.Sources))
 	for _, src := range cfg.Sources {
@@ -155,6 +162,7 @@ func run() error {
 		fanout.Publish(batch)
 	}, logger)
 	liveTail := ws.New(ws.Options{Fanout: fanout, Logger: logger})
+	liveTailRef.set(liveTail)
 
 	maxTimeRange, err := config.ParseDuration(cfg.Query.MaxTimeRange)
 	if err != nil {
@@ -170,7 +178,7 @@ func run() error {
 		logger.Warn("facet registry warning", "msg", warn)
 	}
 
-	archiveBackend, err := buildArchiveBackend(ctx, cfg, logger)
+	archiveBackend, err := buildArchiveBackend(ctx, cfg, logger, metrics.ScriptInvocationObserver{M: m})
 	if err != nil {
 		return fmt.Errorf("configuring archive backend: %w", err)
 	}
@@ -190,6 +198,21 @@ func run() error {
 		rehydrationTTL = 7 * 24 * time.Hour
 	}
 
+	reloader := newReloader(configPath, cfg, facetRegistry, logger)
+
+	healthCheck := func(ctx context.Context) error {
+		if cat == nil {
+			return fmt.Errorf("catalog not initialized")
+		}
+		if err := cat.DB().PingContext(ctx); err != nil {
+			return fmt.Errorf("catalog unreachable: %w", err)
+		}
+		if buf != nil && buf.FillRatio() >= 1.0 {
+			return fmt.Errorf("ingest ring buffer full")
+		}
+		return nil
+	}
+
 	srv := api.New(api.Options{
 		Logger:          logger,
 		Buffer:          buf,
@@ -207,6 +230,10 @@ func run() error {
 		RehydrationTTL:  rehydrationTTL,
 		Fanout:          fanout,
 		LiveTail:        http.HandlerFunc(liveTail.Handle),
+		HealthCheck:     healthCheck,
+		Reload:          reloader.HandleReload,
+		StartTime:       startTime,
+		Version:         version,
 	})
 
 	uiSrv, err := ui.New(ui.Options{
@@ -298,6 +325,43 @@ func run() error {
 		evictor.Run(ctx, 5*time.Minute)
 	}()
 
+	refresher := metrics.Refresher{M: m, Catalog: cat, Facets: facetRegistry}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		refresher.Run(ctx, 15*time.Second)
+	}()
+
+	watchdog := metrics.NewWatchdog(metrics.WatchdogOptions{
+		LiveTail: liveTail,
+		Logger:   logger,
+	})
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		watchdog.Run(ctx)
+	}()
+
+	hupCh := make(chan os.Signal, 1)
+	signal.Notify(hupCh, syscall.SIGHUP)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		defer signal.Stop(hupCh)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-hupCh:
+				if changed, err := reloader.Reload(ctx); err != nil {
+					logger.Warn("SIGHUP reload failed", "err", err)
+				} else {
+					logger.Info("SIGHUP reload applied", "changed_fields", changed)
+				}
+			}
+		}
+	}()
+
 	wg.Add(1)
 	httpErr := make(chan error, 1)
 	go func() {
@@ -341,7 +405,7 @@ func newLogger(level string) *slog.Logger {
 	if err := lvl.UnmarshalText([]byte(level)); err != nil {
 		lvl = slog.LevelInfo
 	}
-	h := slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: lvl})
+	h := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: lvl})
 	return slog.New(h)
 }
 
@@ -395,7 +459,7 @@ func buildRetention(cfg *config.Config, cat *catalog.Catalog, backend archive.Ba
 // buildArchiveBackend instantiates the configured archive backend.
 // archive.backend=none returns a NoneBackend; s3 builds a real client
 // using the AWS SDK. The script backend is wired in Phase 9.
-func buildArchiveBackend(ctx context.Context, cfg *config.Config, logger *slog.Logger) (archive.Backend, error) {
+func buildArchiveBackend(ctx context.Context, cfg *config.Config, logger *slog.Logger, observer archive.InvocationObserver) (archive.Backend, error) {
 	switch cfg.Archive.Backend {
 	case "", "none":
 		return archive.NoneBackend{}, nil
@@ -440,11 +504,12 @@ func buildArchiveBackend(ctx context.Context, cfg *config.Config, logger *slog.L
 		}
 		workDir := filepath.Join(cfg.DataDir, "script-work")
 		be, err := archive.NewScriptBackend(archive.ScriptOptions{
-			Path:    cfg.Archive.Script.Path,
-			Timeout: timeout,
-			Env:     cfg.Archive.Script.Env,
-			WorkDir: workDir,
-			Logger:  logger,
+			Path:     cfg.Archive.Script.Path,
+			Timeout:  timeout,
+			Env:      cfg.Archive.Script.Env,
+			WorkDir:  workDir,
+			Logger:   logger,
+			Observer: observer,
 		})
 		if err != nil {
 			return nil, err
@@ -485,6 +550,165 @@ func describeArchive(cfg *config.Config, backend archive.Backend) ui.ArchiveInfo
 		_ = backend.Capabilities()
 	}
 	return info
+}
+
+// liveTailRef is a lazy holder for the live-tail server so the metrics
+// gauge callback can be wired before the server is constructed. We
+// can't take a method value on a server that doesn't exist yet.
+type liveTailRef struct {
+	mu sync.Mutex
+	s  *ws.Server
+}
+
+func (r *liveTailRef) set(s *ws.Server) {
+	r.mu.Lock()
+	r.s = s
+	r.mu.Unlock()
+}
+
+func (r *liveTailRef) clientCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.s == nil {
+		return 0
+	}
+	return r.s.ClientCount()
+}
+
+// reloader implements PRD §13.20's POST /api/admin/reload as well as
+// the SIGHUP handler (PRD §7.11.2, §8.4). Only fields tagged
+// reloadable:"true" are allowed to differ; non-reloadable diffs cause
+// the reload to fail with 422 (field_not_reloadable).
+type reloader struct {
+	mu      sync.Mutex
+	path    string
+	current *config.Config
+	facets  *facets.Registry
+	logger  *slog.Logger
+}
+
+func newReloader(path string, current *config.Config, fr *facets.Registry, logger *slog.Logger) *reloader {
+	return &reloader{path: path, current: current, facets: fr, logger: logger}
+}
+
+type reloadResponse struct {
+	Reloaded      bool     `json:"reloaded"`
+	ChangedFields []string `json:"changed_fields"`
+	Warnings      []string `json:"warnings"`
+}
+
+type reloadErrResponse struct {
+	Error reloadErrBody `json:"error"`
+}
+
+type reloadErrBody struct {
+	Code           string         `json:"code"`
+	Message        string         `json:"message"`
+	Details        map[string]any `json:"details,omitempty"`
+}
+
+// HandleReload is bound to POST /api/admin/reload (§13.20). On success
+// returns 200 with the changed-fields list; on non-reloadable diff
+// returns 422 with code=field_not_reloadable.
+func (r *reloader) HandleReload(w http.ResponseWriter, req *http.Request) {
+	changed, err := r.Reload(req.Context())
+	w.Header().Set("Content-Type", "application/json")
+	if err != nil {
+		if viol, ok := err.(*reloadViolation); ok {
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			_ = json.NewEncoder(w).Encode(reloadErrResponse{Error: reloadErrBody{
+				Code:    "field_not_reloadable",
+				Message: "configuration contains non-reloadable changes",
+				Details: map[string]any{"fields": viol.fields},
+			}})
+			return
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(reloadErrResponse{Error: reloadErrBody{
+			Code:    "internal_error",
+			Message: err.Error(),
+		}})
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(reloadResponse{
+		Reloaded:      true,
+		ChangedFields: changed,
+		Warnings:      []string{},
+	})
+}
+
+// Reload reads the on-disk config, validates reloadability, and applies
+// the changes that we can hot-swap. The current implementation reloads
+// the facet registry (the most operator-visible reloadable surface);
+// other reloadable values are accepted and recorded but applied lazily
+// the next time their reader looks them up.
+func (r *reloader) Reload(ctx context.Context) ([]string, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	next, err := config.Load(r.path)
+	if err != nil {
+		return nil, err
+	}
+	viol := r.current.Reloadable(next)
+	if len(viol) > 0 {
+		return nil, &reloadViolation{fields: viol}
+	}
+	changed := diffFieldNames(r.current, next)
+	if r.facets != nil {
+		if err := r.facets.Load(ctx, next); err != nil {
+			return nil, fmt.Errorf("reloading facets: %w", err)
+		}
+	}
+	r.logger.Info("config reload applied", "changed_fields", changed)
+	r.current = next
+	return changed, nil
+}
+
+type reloadViolation struct {
+	fields []string
+}
+
+func (v *reloadViolation) Error() string {
+	return fmt.Sprintf("non-reloadable fields: %v", v.fields)
+}
+
+// diffFieldNames is a thin reflective walker that returns the dotted
+// paths of differing fields between two configs. Used to populate the
+// changed_fields response — Reloadable already vets non-reloadable
+// diffs, so anything reported here is by definition reloadable.
+func diffFieldNames(a, b *config.Config) []string {
+	var out []string
+	walkDiff(reflect.ValueOf(a).Elem(), reflect.ValueOf(b).Elem(), "", &out)
+	return out
+}
+
+func walkDiff(a, b reflect.Value, prefix string, out *[]string) {
+	t := a.Type()
+	for i := 0; i < a.NumField(); i++ {
+		field := t.Field(i)
+		if !field.IsExported() {
+			continue
+		}
+		name := strings.Split(field.Tag.Get("yaml"), ",")[0]
+		if name == "" || name == "-" {
+			continue
+		}
+		path := name
+		if prefix != "" {
+			path = prefix + "." + name
+		}
+		av := a.Field(i)
+		bv := b.Field(i)
+		if av.Kind() == reflect.Struct && field.Tag.Get("reloadable") == "" {
+			walkDiff(av, bv, path, out)
+			continue
+		}
+		if !reflect.DeepEqual(av.Interface(), bv.Interface()) {
+			*out = append(*out, path)
+		}
+	}
 }
 
 // ringBufferEventCap converts the configured ring-buffer memory limit

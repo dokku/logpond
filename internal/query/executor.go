@@ -80,12 +80,15 @@ type ResultEvent struct {
 	SegmentID string
 }
 
-// Stats mirrors §13.4's `stats` block.
+// Stats mirrors §13.4's `stats` block. FacetDurationMs is an internal
+// breakout not surfaced on the API; the metrics layer reads it to feed
+// logpond_facet_compute_duration_seconds.
 type Stats struct {
-	RowsScanned  int64
-	RowsReturned int64
-	SegmentsRead int
-	DurationMs   int64
+	RowsScanned     int64
+	RowsReturned    int64
+	SegmentsRead    int
+	DurationMs      int64
+	FacetDurationMs int64
 }
 
 // Response groups the executor output.
@@ -288,10 +291,13 @@ func (e *Executor) Run(ctx context.Context, req Request) (Response, error) {
 		resp.Events = resp.Events[:limit]
 	}
 
+	var facetDurationMs int64
 	if len(req.Facets) > 0 {
 		baseFilter := CombineAnd(timeC, filterC, searchC)
 		sample := selectFacetSample(segs, req.FacetSampleSize)
+		facetStart := time.Now()
 		facets, err := e.computeFacets(ctx, sample, baseFilter, req.Facets)
+		facetDurationMs = time.Since(facetStart).Milliseconds()
 		if err != nil {
 			return Response{}, fmt.Errorf("computing facets: %w", err)
 		}
@@ -299,10 +305,11 @@ func (e *Executor) Run(ctx context.Context, req Request) (Response, error) {
 	}
 
 	resp.Stats = Stats{
-		RowsScanned:  rowsScanned,
-		RowsReturned: int64(len(resp.Events)),
-		SegmentsRead: segsTouched,
-		DurationMs:   time.Since(start).Milliseconds(),
+		RowsScanned:     rowsScanned,
+		RowsReturned:    int64(len(resp.Events)),
+		SegmentsRead:    segsTouched,
+		DurationMs:      time.Since(start).Milliseconds(),
+		FacetDurationMs: facetDurationMs,
 	}
 	return resp, nil
 }

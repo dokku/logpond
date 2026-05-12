@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"time"
 
 	"github.com/dokku/logpond/internal/query/parser"
 )
@@ -30,7 +31,11 @@ func (s *Server) handleParseQuery(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "bad_request", "invalid JSON: "+err.Error(), nil)
 		return
 	}
+	parseStart := time.Now()
 	res, err := parser.Parse(req.Q)
+	if s.metrics != nil {
+		s.metrics.SearchBarParseDuration.Observe(time.Since(parseStart).Seconds())
+	}
 	if err != nil {
 		var pe parser.ParseError
 		if errors.As(err, &pe) {

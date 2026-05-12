@@ -55,13 +55,21 @@ const (
 // segment's archive_ref (PRD §7.9.3).
 const archiveRefPrefix = "LOGPOND_ARCHIVE_REF="
 
+// InvocationObserver receives one call per script invocation. Used by
+// the metrics layer to feed logpond_archive_script_invocations_total
+// and logpond_archive_script_duration_seconds.
+type InvocationObserver interface {
+	ObserveScriptInvocation(mode string, exitCode int, duration time.Duration)
+}
+
 // ScriptOptions configures a ScriptBackend.
 type ScriptOptions struct {
-	Path    string
-	Timeout time.Duration
-	Env     map[string]string
-	WorkDir string
-	Logger  *slog.Logger
+	Path     string
+	Timeout  time.Duration
+	Env      map[string]string
+	WorkDir  string
+	Logger   *slog.Logger
+	Observer InvocationObserver
 
 	// terminationGrace is exposed for tests; production uses the constant.
 	terminationGrace time.Duration
@@ -80,11 +88,12 @@ type ScriptBackend struct {
 	logger           *slog.Logger
 	terminationGrace time.Duration
 	nowFunc          func() time.Time
+	observer         InvocationObserver
 
 	mu sync.Mutex // serializes script invocations
 
-	capMu  sync.Mutex
-	caps   probeState
+	capMu sync.Mutex
+	caps  probeState
 }
 
 // probeState records per-mode availability. The script backend caches
@@ -140,6 +149,7 @@ func NewScriptBackend(opts ScriptOptions) (*ScriptBackend, error) {
 		logger:           opts.Logger,
 		terminationGrace: grace,
 		nowFunc:          now,
+		observer:         opts.Observer,
 	}, nil
 }
 
@@ -501,6 +511,9 @@ func (b *ScriptBackend) exec(ctx context.Context, mode string, args []string, ex
 		"timed_out", out.timedOut,
 		"duration_ms", duration.Milliseconds(),
 	)
+	if b.observer != nil {
+		b.observer.ObserveScriptInvocation(mode, out.exitCode, duration)
+	}
 
 	if out.timedOut {
 		return out, fmt.Errorf("script %s: timed out after %s", mode, b.timeout)

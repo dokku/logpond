@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/dokku/logpond/internal/query"
 	"github.com/dokku/logpond/internal/query/parser"
@@ -99,6 +100,7 @@ func (s *Server) handleQueryCount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	countStart := time.Now()
 	count, exact, _, durationMs, err := s.executor.Count(r.Context(), query.Request{
 		From:         req.TimeRange.From.UTC(),
 		To:           req.TimeRange.To.UTC(),
@@ -106,6 +108,9 @@ func (s *Server) handleQueryCount(w http.ResponseWriter, r *http.Request) {
 		Search:       search,
 		MaxTimeRange: s.maxTimeRange,
 	}, countLimitGuard)
+	if s.metrics != nil {
+		s.metrics.QueryCountDuration.Observe(time.Since(countStart).Seconds())
+	}
 	if err != nil {
 		s.writeQueryError(w, err)
 		return

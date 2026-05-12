@@ -88,6 +88,18 @@ type Server struct {
 	onClose          func(websocket.StatusCode)
 
 	clients atomic.Int64
+
+	registryMu sync.Mutex
+	registry   []*clientHandle // ordered by connection age, oldest first
+	nextID     uint64
+	accepting  bool
+}
+
+// clientHandle is the watchdog-visible record for a connected
+// live-tail client. The cancel func tears the connection down.
+type clientHandle struct {
+	id     uint64
+	cancel context.CancelFunc
 }
 
 // New constructs a Server. The fan-out must be non-nil; nil fan-out
@@ -125,7 +137,64 @@ func New(opts Options) *Server {
 		sendQueueCap:     opts.SendQueueCapacity,
 		renderer:         r,
 		onClose:          opts.OnClose,
+		accepting:        true,
 	}
+}
+
+// SetAcceptingNewClients toggles whether new live-tail connections are
+// accepted. The memory-pressure watchdog (PRD §8.2) uses this to refuse
+// new connections during sustained pressure.
+func (s *Server) SetAcceptingNewClients(ok bool) {
+	s.registryMu.Lock()
+	s.accepting = ok
+	s.registryMu.Unlock()
+}
+
+// ShedOldest closes the oldest connected client. Used by the
+// memory-pressure watchdog (PRD §8.2). Returns false when there are no
+// clients to shed.
+func (s *Server) ShedOldest() bool {
+	s.registryMu.Lock()
+	if len(s.registry) == 0 {
+		s.registryMu.Unlock()
+		return false
+	}
+	h := s.registry[0]
+	s.registry = s.registry[1:]
+	s.registryMu.Unlock()
+	h.cancel()
+	return true
+}
+
+func (s *Server) registerClient(cancel context.CancelFunc) *clientHandle {
+	s.registryMu.Lock()
+	defer s.registryMu.Unlock()
+	s.nextID++
+	h := &clientHandle{id: s.nextID, cancel: cancel}
+	s.registry = append(s.registry, h)
+	return h
+}
+
+func (s *Server) unregisterClient(h *clientHandle) {
+	if h == nil {
+		return
+	}
+	s.registryMu.Lock()
+	defer s.registryMu.Unlock()
+	for i, c := range s.registry {
+		if c == h {
+			s.registry = append(s.registry[:i], s.registry[i+1:]...)
+			return
+		}
+	}
+}
+
+// acceptingNewClients reports whether new connections are currently
+// accepted. Watchdog flips this off during sustained memory pressure.
+func (s *Server) acceptingNewClients() bool {
+	s.registryMu.Lock()
+	defer s.registryMu.Unlock()
+	return s.accepting
 }
 
 // ClientCount returns the number of currently connected live-tail
@@ -137,6 +206,11 @@ func (s *Server) ClientCount() int { return int(s.clients.Load()) }
 func (s *Server) Handle(w http.ResponseWriter, r *http.Request) {
 	if s.fanout == nil {
 		http.Error(w, "live tail disabled", http.StatusServiceUnavailable)
+		return
+	}
+
+	if !s.acceptingNewClients() {
+		http.Error(w, "live tail temporarily unavailable", http.StatusServiceUnavailable)
 		return
 	}
 
@@ -167,7 +241,12 @@ func (s *Server) Handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.runConnection(r.Context(), conn)
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+	handle := s.registerClient(cancel)
+	defer s.unregisterClient(handle)
+
+	s.runConnection(ctx, conn)
 }
 
 // statusMessage is the server's status frame (PRD §13.7).

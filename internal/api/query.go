@@ -155,6 +155,7 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	queryStart := time.Now()
 	resp, err := s.executor.Run(r.Context(), query.Request{
 		From:            req.TimeRange.From.UTC(),
 		To:              req.TimeRange.To.UTC(),
@@ -167,6 +168,12 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 		Facets:          specs,
 		FacetSampleSize: s.facetSampleSize,
 	})
+	if s.metrics != nil {
+		s.metrics.QueryDuration.Observe(time.Since(queryStart).Seconds())
+		if len(specs) > 0 && resp.Stats.FacetDurationMs > 0 {
+			s.metrics.FacetComputeDuration.Observe(float64(resp.Stats.FacetDurationMs) / 1000.0)
+		}
+	}
 	if err != nil {
 		s.writeQueryError(w, err)
 		return
