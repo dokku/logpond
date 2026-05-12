@@ -1,3 +1,9 @@
 docs/IMPLEMENTATION-PLAN.md
 /logpond
 tmp/
+
+# Vendored frontend dependencies — fetched by scripts/vendor.sh.
+# Keep the README + .gitkeep tracked so the directory exists.
+static/vendor/*
+!static/vendor/.gitkeep
+!static/vendor/README.md
