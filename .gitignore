@@ -1,5 +1,7 @@
 docs/IMPLEMENTATION-PLAN.md
 /logpond
+/loadgen
+/querybench
 tmp/
 
 # Vendored frontend dependencies - fetched by scripts/vendor.sh into the
