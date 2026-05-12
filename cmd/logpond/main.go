@@ -23,6 +23,7 @@ import (
 	"github.com/dokku/logpond/internal/ingest"
 	"github.com/dokku/logpond/internal/metrics"
 	"github.com/dokku/logpond/internal/query"
+	"github.com/dokku/logpond/internal/retention"
 	"github.com/dokku/logpond/internal/segments"
 )
 
@@ -158,6 +159,11 @@ func run() error {
 		logger.Warn("facet registry warning", "msg", warn)
 	}
 
+	retentionEval, retentionInterval, err := buildRetention(cfg, cat, logger)
+	if err != nil {
+		return fmt.Errorf("configuring retention: %w", err)
+	}
+
 	srv := api.New(api.Options{
 		Logger:          logger,
 		Buffer:          buf,
@@ -165,6 +171,7 @@ func run() error {
 		Extractors:      extractors,
 		Executor:        executor,
 		Facets:          facetRegistry,
+		Retention:       retentionEval,
 		MaxTimeRange:    maxTimeRange,
 		FacetSampleSize: cfg.Facets.SegmentSampleSize,
 	})
@@ -186,6 +193,12 @@ func run() error {
 	go func() {
 		defer wg.Done()
 		mgr.RunSealLoop(ctx, sealInterval)
+	}()
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		retentionEval.RunLoop(ctx, retentionInterval)
 	}()
 
 	wg.Add(1)
@@ -233,6 +246,51 @@ func newLogger(level string) *slog.Logger {
 	}
 	h := slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: lvl})
 	return slog.New(h)
+}
+
+// buildRetention parses the retention block in cfg and returns a
+// ready-to-run evaluator alongside the desired loop interval. An empty
+// policy still yields a valid Evaluator; RunLoop blocks until ctx ends
+// without doing any work in that case.
+func buildRetention(cfg *config.Config, cat *catalog.Catalog, logger *slog.Logger) (*retention.Evaluator, time.Duration, error) {
+	var maxAge time.Duration
+	if cfg.Retention.MaxAge != "" {
+		d, err := config.ParseDuration(cfg.Retention.MaxAge)
+		if err != nil {
+			return nil, 0, fmt.Errorf("parsing retention.max_age: %w", err)
+		}
+		maxAge = d
+	}
+	var maxSize int64
+	if cfg.Retention.MaxSize != "" {
+		n, err := config.ParseSize(cfg.Retention.MaxSize)
+		if err != nil {
+			return nil, 0, fmt.Errorf("parsing retention.max_size: %w", err)
+		}
+		maxSize = n
+	}
+	interval := retention.DefaultEvaluationInterval
+	if cfg.Retention.EvaluationInterval != "" {
+		d, err := config.ParseDuration(cfg.Retention.EvaluationInterval)
+		if err != nil {
+			return nil, 0, fmt.Errorf("parsing retention.evaluation_interval: %w", err)
+		}
+		if d > 0 {
+			interval = d
+		}
+	}
+	eval, err := retention.New(retention.Options{
+		Catalog:             cat,
+		MaxAge:              maxAge,
+		MaxSize:             maxSize,
+		ArchiveBeforeDelete: cfg.Retention.ArchiveBeforeDelete,
+		BackendActive:       cfg.Archive.Backend != "" && cfg.Archive.Backend != "none",
+		Logger:              logger,
+	})
+	if err != nil {
+		return nil, 0, err
+	}
+	return eval, interval, nil
 }
 
 // ringBufferEventCap converts the configured ring-buffer memory limit

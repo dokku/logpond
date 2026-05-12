@@ -302,6 +302,51 @@ func (c *Catalog) ListSegmentsByState(ctx context.Context, state string) ([]Segm
 	return out, rows.Err()
 }
 
+// ListLocalSegments returns every segment whose local_path points at a
+// file on disk, ordered oldest-first by time_end. These are the rows
+// retention reasons about per PRD §7.8.
+func (c *Catalog) ListLocalSegments(ctx context.Context) ([]Segment, error) {
+	rows, err := c.db.QueryContext(ctx, `
+        SELECT `+segmentColumns+` FROM segments
+        WHERE local_path IS NOT NULL AND local_path != ''
+          AND state IN (?, ?, ?)
+        ORDER BY time_end ASC`,
+		StateSealed, StateArchived, StateRehydrated)
+	if err != nil {
+		return nil, fmt.Errorf("listing local segments: %w", err)
+	}
+	defer rows.Close()
+	var out []Segment
+	for rows.Next() {
+		s, err := scanSegment(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, s)
+	}
+	return out, rows.Err()
+}
+
+// ClearLocalFile transitions a segment to nextState and nulls out
+// local_path. Retention uses this when it removes a segment's local
+// Parquet (sealed → lost, rehydrated → archived, archived → archived).
+func (c *Catalog) ClearLocalFile(ctx context.Context, id, nextState string) error {
+	res, err := c.db.ExecContext(ctx,
+		`UPDATE segments SET state = ?, local_path = NULL, evict_after = NULL WHERE id = ?`,
+		nextState, id)
+	if err != nil {
+		return fmt.Errorf("clearing local file for %s: %w", id, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return fmt.Errorf("segment %s not found", id)
+	}
+	return nil
+}
+
 // CustomFacetSourceConfig marks rows that originated from the static
 // YAML config; CustomFacetSourceUI marks rows that the operator added
 // at runtime via the Admin API.

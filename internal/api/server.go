@@ -19,6 +19,7 @@ import (
 	"github.com/dokku/logpond/internal/ingest"
 	"github.com/dokku/logpond/internal/metrics"
 	"github.com/dokku/logpond/internal/query"
+	"github.com/dokku/logpond/internal/retention"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 )
@@ -38,6 +39,7 @@ type Server struct {
 	extractors      map[string]*ingest.Extractor
 	executor        *query.Executor
 	facets          *facets.Registry
+	retention       *retention.Evaluator
 	maxTimeRange    time.Duration
 	facetSampleSize int
 }
@@ -55,6 +57,7 @@ type Options struct {
 	Extractors      map[string]*ingest.Extractor
 	Executor        *query.Executor
 	Facets          *facets.Registry
+	Retention       *retention.Evaluator
 	MaxTimeRange    time.Duration
 	FacetSampleSize int
 }
@@ -76,6 +79,7 @@ func New(opts Options) *Server {
 		extractors:      opts.Extractors,
 		executor:        opts.Executor,
 		facets:          opts.Facets,
+		retention:       opts.Retention,
 		maxTimeRange:    opts.MaxTimeRange,
 		facetSampleSize: opts.FacetSampleSize,
 	}
@@ -90,6 +94,7 @@ func New(opts Options) *Server {
 	r.Post("/api/facets", s.handleCreateFacet)
 	r.Patch("/api/facets/{name}", s.handlePatchFacet)
 	r.Delete("/api/facets/{name}", s.handleDeleteFacet)
+	r.Post("/api/admin/retention/run", s.handleRetentionRun)
 
 	return s
 }

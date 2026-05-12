@@ -243,3 +243,43 @@ to `max+1` for the requested suggestion limit. This means the value
 suggestions reflect the current N-segment sample exactly as the
 sidebar will, and we don't need a second SQL surface dedicated to
 suggestions.
+
+## Phase 7 — Retention
+
+### Max-age uses `time_end`, protected window uses `sealed_at`
+
+PRD §7.8 doesn't specify whether `max_age` compares against the
+segment's window-end timestamp or the moment the segment sealed. The
+evaluator uses `time_end` (the data's age) for the age policy and
+`sealed_at` for the protected-window check. That matches operator
+intent ("delete logs older than 30 days") while still honoring "never
+delete a freshly-sealed segment for one hour" — a segment whose window
+ended weeks ago but only just finished sealing is still protected.
+
+### Verb wording follows the §13.21 example
+
+The evaluator emits two action verbs: `delete` (the local file will be
+removed and the catalog state transitions to `lost` or `archived`) and
+`archive_then_delete` (the segment needs archiving first, so the
+current cycle does nothing). The latter matches the example in PRD
+§13.21 and stays accurate when Phase 8 wires the archive backend — the
+verb describes the plan, not whether anything happened on this pass.
+
+### State transitions on deletion
+
+- `sealed` → `lost` when archive_before_delete=false or no backend.
+- `archived` (with local file) → stays `archived`, local_path cleared.
+- `rehydrated` → `archived`, local_path and evict_after cleared (the
+  archive ref still points at the off-disk copy).
+
+Adding a new `deleted` state would clutter §10.2 and confuse crash
+recovery, which already uses `lost` for "catalog entry without file".
+
+### Retention scans `local_path IS NOT NULL`
+
+The evaluator pulls candidates via `ListLocalSegments`, which filters
+on `local_path` rather than state alone. This guarantees we never
+attempt to remove an `archived`-state row whose local file was already
+cleared, even if its `state` column still reads `archived` from a
+prior pass.
+
