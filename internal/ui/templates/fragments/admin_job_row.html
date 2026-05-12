@@ -1,0 +1,11 @@
+{{define "fragments/admin_job_row.html" -}}
+<span class="job-indicator job-{{.State}}"
+  {{if not .Done}}{{if not .Failed}}
+  hx-get="/ui/admin/jobs/{{.JobID}}?segment_id={{.SegmentID}}"
+  hx-target="closest td" hx-swap="innerHTML"
+  hx-trigger="every 2s"
+  {{end}}{{end}}>
+  {{.State}} · {{.Progress}}
+  {{if .Failed}}<span class="status-bad" title="{{.Error}}">failed</span>{{end}}
+</span>
+{{- end}}

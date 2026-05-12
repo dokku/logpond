@@ -1,0 +1,10 @@
+{{define "fragments/admin_storage.html" -}}
+<dl class="meta storage-meta">
+  <dt>Active</dt><dd>{{.Active.Count}} segment(s){{if .Active.SizeDisplay}} · {{.Active.SizeDisplay}}{{end}}</dd>
+  <dt>Sealed (local)</dt><dd>{{.Sealed.SizeDisplay}} · {{.Sealed.Count}} segment(s)</dd>
+  <dt>Rehydrated</dt><dd>{{.Rehydrated.SizeDisplay}} · {{.Rehydrated.Count}} segment(s)</dd>
+  <dt>Archived (off-host)</dt><dd>{{.Archived.SizeDisplay}} · {{.Archived.Count}} segment(s)</dd>
+  <dt>Total local</dt><dd>{{.TotalLocal.SizeDisplay}}{{if .MaxSize}} (of {{.MaxSize}} cap){{end}}</dd>
+</dl>
+<p class="muted">Updated {{.UpdatedAt}}</p>
+{{- end}}

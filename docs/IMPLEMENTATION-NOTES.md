@@ -661,3 +661,58 @@ exactly as implemented. The Alpine controller cycles
 "auto" deletes the attribute so the media query takes effect. This
 matches the PRD's "Auto mode is the absence of `data-theme`"
 literally.
+
+## Phase 13 — Admin UI
+
+### "Test invocation" re-runs `--probe` instead of a synthetic archive
+
+- **PRD §14.4.** "Test invocation (script only) runs the script in
+  archive mode against a tiny synthetic segment; output shown in a
+  modal."
+- **What ships.** The `[ Test invocation ]` button calls the script
+  backend's `Probe(ctx)` and displays the refreshed capability state.
+  Stdout/stderr capture is shown only when probe surfaces it (currently
+  probe ignores those streams).
+
+Fabricating a "tiny synthetic segment" at admin-click time means
+writing a real Parquet file (DuckDB COPY of a single placeholder row)
+and feeding it through the script's archive contract. The synthetic
+parquet would then land in the operator's restic/rclone destination,
+polluting their real archive — exactly the surprise we want to avoid
+from a button the operator clicks for diagnostics. Probe is the
+nearest stand-in: it exercises the script's exec path, surfaces fresh
+capability state, and never produces a real archive object. A
+synthetic-archive variant can ship later behind an opt-in flag if
+operators ask for it.
+
+### Admin handlers fork minimal state-transition helpers from `api`
+
+`internal/ui/admin.go` carries small copies of
+`api.evictRehydratedSegment` and the per-segment archive/rehydrate job
+bodies so the UI package doesn't import `internal/api`. Both flows
+ultimately call the same catalog primitives
+(`MarkSegmentArchived` / `MarkSegmentRehydrated` / `ClearLocalFile`),
+so the semantics stay aligned. The /api/* JSON endpoints remain the
+source of truth for bulk operations (older-than archive, time-range
+rehydrate); the /ui/admin/* endpoints exist for single-segment
+operator actions.
+
+### Storage pane omits active segment size
+
+The catalog's `size_bytes` is the on-disk sealed Parquet size; the
+active segment's DuckDB file isn't tracked there because its size
+grows continuously between flushes. Rather than stat the DuckDB file
+on every storage refresh (extra disk I/O on a 10s tick), the pane
+shows the active segment as a count-only entry. PRD §14.4's mockup
+calls out `Active segment: 1.4 GB`; we'll add the real number alongside
+the Phase 14 metrics surface, which already needs to read RSS/disk
+gauges.
+
+### Admin live state cached in-process, not in the catalog
+
+Last-retention/verify/test results are kept on `ui.Server.adminState`
+so a page refresh re-renders the previous result. The state is
+volatile — it resets on process restart. Persisting these into the
+catalog would require a new table for what is essentially a UI
+convenience (the underlying jobs row already records the durable
+record of each operation).

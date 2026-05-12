@@ -126,6 +126,11 @@ document.addEventListener("alpine:init", () => {
     },
   }));
 
+  Alpine.data("adminView", () => ({
+    facetModal: false,
+    importModal: false,
+  }));
+
   Alpine.data("tailView", () => ({
     running: false,
     paused: false,

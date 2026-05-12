@@ -1,0 +1,27 @@
+{{define "fragments/admin_segments.html" -}}
+<table class="meta-table segments-table">
+  <thead>
+    <tr>
+      <th>ID</th>
+      <th>State</th>
+      <th>Time range</th>
+      <th>Rows</th>
+      <th>Size</th>
+      <th class="actions">Action</th>
+    </tr>
+  </thead>
+  <tbody>
+    {{range .Items}}
+    {{template "fragments/admin_segment_row.html" .}}
+    {{end}}
+    {{if eq (len .Items) 0}}
+    <tr><td colspan="6" class="muted">No segments match the current filter.</td></tr>
+    {{end}}
+  </tbody>
+</table>
+<p class="muted segments-pager">
+  {{.Total}} total{{if .State}} (filtered to {{.State}}){{end}}.
+  {{if .HasPrev}}<a href="#" hx-get="{{.PrevURL}}" hx-target="#segment-table" hx-swap="innerHTML">Prev</a>{{end}}
+  {{if .HasNext}}<a href="#" hx-get="{{.NextURL}}" hx-target="#segment-table" hx-swap="innerHTML">Next</a>{{end}}
+</p>
+{{- end}}

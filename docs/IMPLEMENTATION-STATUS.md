@@ -15,7 +15,7 @@ Tracks progress against `IMPLEMENTATION-PLAN.md`.
 - [x] Phase 10 — Rehydration and sideload
 - [x] Phase 11 — Live tail (WebSocket)
 - [x] Phase 12 — Web UI (HTMX + Alpine + Open Props)
-- [ ] Phase 13 — Admin UI (facets, segments, archive controls)
+- [x] Phase 13 — Admin UI (facets, segments, archive controls)
 - [ ] Phase 14 — Metrics, health, observability
 - [ ] Phase 15 — Container image and Dokku deployment
 - [ ] Phase 16 — Soak test and hardening

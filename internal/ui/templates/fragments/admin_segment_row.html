@@ -1,0 +1,27 @@
+{{define "fragments/admin_segment_row.html" -}}
+<tr id="segment-{{.ID}}">
+  <td><code>{{.ID}}</code></td>
+  <td><span class="state-badge state-{{.State}}">{{.StateLabel}}</span></td>
+  <td>{{.TimeRange}}{{if .IsCurrent}} <span class="muted">(current)</span>{{end}}</td>
+  <td>{{.RowsDisplay}}</td>
+  <td>{{.SizeDisplay}}</td>
+  <td class="actions">
+    {{if eq .Action.Kind "archive"}}
+      <button type="button" class="btn"
+        hx-post="/ui/admin/segments/{{.ID}}/archive"
+        hx-target="closest td" hx-swap="innerHTML">Archive</button>
+    {{else if eq .Action.Kind "rehydrate"}}
+      <button type="button" class="btn"
+        hx-post="/ui/admin/segments/{{.ID}}/rehydrate"
+        hx-target="closest td" hx-swap="innerHTML">Rehydrate</button>
+    {{else if eq .Action.Kind "evict"}}
+      <button type="button" class="btn btn-danger"
+        hx-delete="/ui/admin/rehydrated/{{.ID}}"
+        hx-target="#segment-{{.ID}}" hx-swap="outerHTML"
+        hx-confirm="Evict local copy of {{.ID}}? Archive copy is kept.">Evict</button>
+    {{else}}
+      <span class="muted" title="{{.Action.Tooltip}}">—</span>
+    {{end}}
+  </td>
+</tr>
+{{- end}}

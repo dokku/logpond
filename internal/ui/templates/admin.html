@@ -7,43 +7,145 @@
   {{template "fragments/topbar.html" .}}
   <main id="main" class="view view-admin">
     {{with .Page}}
-    <div class="admin">
-      <section class="admin-section">
+    <div class="admin" x-data="adminView()">
+      <section class="admin-section" id="retention-pane">
         <h2>Retention policy</h2>
         <dl class="meta">
           <dt>Max age</dt><dd>{{or .Retention.MaxAge "—"}}</dd>
           <dt>Max disk size</dt><dd>{{or .Retention.MaxSize "—"}}</dd>
           <dt>Archive before delete</dt><dd>{{if .Retention.ArchiveBeforeDelete}}yes{{else}}no{{end}}</dd>
         </dl>
-        <p class="muted">Controls land in Phase 13. Use POST /api/admin/retention/run from the JSON API for now.</p>
+        <div class="admin-actions">
+          <button type="button" class="btn"
+            hx-post="/ui/admin/retention/run?dry_run=true"
+            hx-target="#retention-result" hx-swap="innerHTML">Dry run</button>
+          <button type="button" class="btn btn-primary"
+            hx-post="/ui/admin/retention/run?dry_run=false"
+            hx-target="#retention-result" hx-swap="innerHTML"
+            hx-confirm="Run retention now? This may delete or archive segments.">Run now</button>
+        </div>
+        <div id="retention-result" class="admin-result">
+          {{with .Retention.LastResult}}{{template "fragments/admin_retention_result.html" .}}{{end}}
+        </div>
       </section>
 
-      <section class="admin-section">
+      <section class="admin-section" id="archive-pane">
         <h2>Archive backend</h2>
         <dl class="meta">
           <dt>Type</dt><dd>{{.Archive.Kind}}</dd>
-          <dt>Detail</dt><dd>{{.Archive.Detail}}</dd>
+          {{if .Archive.S3}}
+            <dt>Endpoint</dt><dd>{{or .Archive.S3.Endpoint "—"}}</dd>
+            <dt>Bucket</dt><dd>{{.Archive.S3.Bucket}}</dd>
+            <dt>Prefix</dt><dd>{{or .Archive.S3.Prefix "—"}}</dd>
+          {{end}}
+          {{if .Archive.Script}}
+            <dt>Path</dt><dd><code>{{.Archive.Script.Path}}</code></dd>
+            {{if .Archive.Script.Timeout}}<dt>Timeout</dt><dd>{{.Archive.Script.Timeout}}</dd>{{end}}
+            <dt>Capabilities</dt>
+            <dd>
+              archive <span class="cap cap-{{.Archive.Capabilities.Archive}}">{{.Archive.Capabilities.Archive}}</span>
+              · verify <span class="cap cap-{{.Archive.Capabilities.Verify}}">{{.Archive.Capabilities.Verify}}</span>
+              · retrieve <span class="cap cap-{{.Archive.Capabilities.Retrieve}}">{{.Archive.Capabilities.Retrieve}}</span>
+            </dd>
+          {{end}}
         </dl>
-        <p class="muted">Use POST /api/admin/archive/verify and GET /api/admin/archive/capabilities for runtime state.</p>
+        <div class="admin-actions">
+          <button type="button" class="btn"
+            hx-post="/ui/admin/archive/verify"
+            hx-target="#archive-result" hx-swap="innerHTML">Verify archive</button>
+          {{if .Archive.Script}}
+          <button type="button" class="btn"
+            hx-post="/ui/admin/archive/test"
+            hx-target="#archive-result" hx-swap="innerHTML">Test invocation</button>
+          {{end}}
+        </div>
+        <div id="archive-result" class="admin-result">
+          {{with .Archive.LastVerify}}{{template "fragments/admin_verify_result.html" .}}{{end}}
+          {{with .Archive.LastTest}}{{template "fragments/admin_test_result.html" .}}{{end}}
+        </div>
       </section>
 
-      <section class="admin-section">
-        <h2>Facets</h2>
-        <table class="meta-table">
-          <thead><tr><th>Name</th><th>Field</th><th>Label</th><th>Cap</th><th>Source</th></tr></thead>
-          <tbody>
-            {{range .Facets}}
-            <tr>
-              <td>{{.Name}}</td>
-              <td><code>{{.Field}}</code></td>
-              <td>{{.DisplayLabel}}</td>
-              <td>{{.CardinalityCap}}</td>
-              <td>{{if eq (printf "%s" .Source) ""}}{{.Kind}}{{else}}{{.Source}}{{end}}</td>
-            </tr>
-            {{end}}
-          </tbody>
-        </table>
-        <p class="muted">Facet CRUD lives at /api/facets; UI surfaces land in Phase 13.</p>
+      <section class="admin-section" id="facets-pane">
+        <div class="admin-section-head">
+          <h2>Facets</h2>
+          <button type="button" class="btn" x-on:click="facetModal = true">+ Add facet</button>
+        </div>
+        <div id="facet-table">
+          {{template "fragments/admin_facet_table.html" .Facets}}
+        </div>
+        <p class="muted">Segment sample size: {{.SampleSize}}</p>
+
+        <div x-show="facetModal" x-cloak class="modal-overlay" x-on:click.self="facetModal = false">
+          <div class="modal" role="dialog" aria-label="Add facet">
+            <h3>Add facet</h3>
+            <form hx-post="/ui/admin/facets" hx-target="#facet-table" hx-swap="innerHTML"
+              x-on:htmx:after-request="if ($event.detail.successful) { facetModal = false }">
+              <label>Name<input type="text" name="name" required></label>
+              <label>Field
+                <input type="text" name="field" list="facet-field-suggestions" required>
+                <datalist id="facet-field-suggestions">
+                  {{range .FacetFields}}<option value="{{.}}"></option>{{end}}
+                </datalist>
+              </label>
+              <label>Display label<input type="text" name="display_label"></label>
+              <label>Cardinality cap<input type="number" name="cardinality_cap" min="1" max="1000" value="25"></label>
+              <label>Value type
+                <select name="value_type">
+                  <option value="string">string</option>
+                  <option value="number">number</option>
+                </select>
+              </label>
+              <div class="modal-actions">
+                <button type="button" class="btn" x-on:click="facetModal = false">Cancel</button>
+                <button type="submit" class="btn btn-primary">Add</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      </section>
+
+      <section class="admin-section" id="storage-pane">
+        <h2>Storage</h2>
+        <div id="storage-body" hx-get="/ui/admin/storage" hx-trigger="every 10s" hx-swap="innerHTML">
+          {{template "fragments/admin_storage.html" .Storage}}
+        </div>
+      </section>
+
+      <section class="admin-section" id="segments-pane">
+        <div class="admin-section-head">
+          <h2>Segments</h2>
+          <form class="row segments-filter" hx-get="/ui/admin/segments" hx-target="#segment-table" hx-swap="innerHTML"
+            hx-trigger="change">
+            <label>Filter
+              {{$current := .Segments.State}}
+              <select name="state">
+                {{range .Segments.States}}
+                <option value="{{.}}"{{if eq . $current}} selected{{end}}>{{if eq . ""}}All{{else}}{{.}}{{end}}</option>
+                {{end}}
+              </select>
+            </label>
+            <button type="button" class="btn" x-on:click="importModal = true">+ Import segment</button>
+          </form>
+        </div>
+        <div id="segment-table">
+          {{template "fragments/admin_segments.html" .Segments}}
+        </div>
+
+        <div x-show="importModal" x-cloak class="modal-overlay" x-on:click.self="importModal = false">
+          <div class="modal" role="dialog" aria-label="Import segment">
+            <h3>Import segment</h3>
+            <form hx-post="/ui/admin/import" hx-encoding="multipart/form-data" hx-target="#import-result" hx-swap="innerHTML">
+              <label>Parquet file<input type="file" name="parquet" accept=".parquet" required></label>
+              <label>Manifest<input type="file" name="manifest" accept=".json" required></label>
+              <label><input type="checkbox" name="persistent" value="true"> Persistent (no TTL eviction)</label>
+              <div class="modal-actions">
+                <button type="button" class="btn" x-on:click="importModal = false">Cancel</button>
+                <button type="submit" class="btn btn-primary">Upload</button>
+              </div>
+            </form>
+            <div id="import-result"></div>
+          </div>
+        </div>
       </section>
     </div>
     {{end}}

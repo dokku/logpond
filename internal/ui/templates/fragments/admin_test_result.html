@@ -1,0 +1,15 @@
+{{define "fragments/admin_test_result.html" -}}
+<div class="test-result">
+  {{if .Error}}
+    <div class="inline-error">Test invocation failed: {{.Error}}</div>
+  {{else}}
+    <p class="muted">Probe refreshed. Capabilities:
+      archive <span class="cap cap-{{.Capabilities.Archive}}">{{.Capabilities.Archive}}</span>
+      · verify <span class="cap cap-{{.Capabilities.Verify}}">{{.Capabilities.Verify}}</span>
+      · retrieve <span class="cap cap-{{.Capabilities.Retrieve}}">{{.Capabilities.Retrieve}}</span>
+    </p>
+    {{if .Stdout}}<details><summary>stdout</summary><pre>{{.Stdout}}</pre></details>{{end}}
+    {{if .Stderr}}<details><summary>stderr</summary><pre>{{.Stderr}}</pre></details>{{end}}
+  {{end}}
+</div>
+{{- end}}

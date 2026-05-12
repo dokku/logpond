@@ -1,0 +1,25 @@
+{{define "fragments/admin_verify_result.html" -}}
+<div class="verify-result">
+  {{if .Error}}
+    <div class="inline-error">Verify failed: {{.Error}}</div>
+  {{else}}
+    <p class="muted">
+      backend <code>{{.Backend}}</code> · scanned <strong>{{.Scanned}}</strong>
+      {{if gt .Verified 0}} · verified <strong>{{.Verified}}</strong>{{end}}
+    </p>
+    {{if .Orphaned}}<p>Orphaned parquets: {{len .Orphaned}}</p>{{end}}
+    {{if .Dangling}}<p>Dangling manifests: {{len .Dangling}}</p>{{end}}
+    {{if .Missing}}<p>Missing parquets: {{len .Missing}}</p>{{end}}
+    {{if .Failed}}
+    <table class="meta-table">
+      <thead><tr><th>Segment</th><th>Exit code</th><th>Note</th></tr></thead>
+      <tbody>
+        {{range .Failed}}
+        <tr><td><code>{{.SegmentID}}</code></td><td>{{.ExitCode}}</td><td>{{.Note}}</td></tr>
+        {{end}}
+      </tbody>
+    </table>
+    {{end}}
+  {{end}}
+</div>
+{{- end}}

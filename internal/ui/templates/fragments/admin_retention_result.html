@@ -1,0 +1,31 @@
+{{define "fragments/admin_retention_result.html" -}}
+<div class="retention-result {{if .Error}}retention-error{{end}}">
+  {{if .Error}}
+    <div class="inline-error">Retention failed: {{.Error}}</div>
+  {{else}}
+    <p class="muted">
+      {{if .DryRun}}Dry run · {{end}}
+      Evaluated <strong>{{.Evaluated}}</strong> segment(s), {{len .Actions}} action(s).
+    </p>
+    {{if .Actions}}
+    <table class="meta-table">
+      <thead><tr><th>Segment</th><th>Action</th><th>Reason</th><th>Status</th></tr></thead>
+      <tbody>
+        {{range .Actions}}
+        <tr>
+          <td><code>{{.SegmentID}}</code></td>
+          <td>{{.Action}}</td>
+          <td>{{.Reason}}</td>
+          <td>
+            {{if .Error}}<span class="status-bad">{{.Error}}</span>
+            {{else if .Executed}}<span class="status-ok">executed</span>
+            {{else}}<span class="muted">planned</span>{{end}}
+          </td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+    {{end}}
+  {{end}}
+</div>
+{{- end}}

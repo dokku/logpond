@@ -1,0 +1,53 @@
+{{define "fragments/admin_facet_table.html" -}}
+<table class="meta-table facet-table">
+  <thead><tr><th>Name</th><th>Field</th><th>Label</th><th>Cap</th><th>Source</th><th class="actions">Actions</th></tr></thead>
+  <tbody>
+    {{range .Items}}
+    <tr x-data="{ edit: false }">
+      <td>{{.Name}}</td>
+      <td><code>{{.Field}}</code></td>
+      <td>
+        <span x-show="!edit">{{.DisplayLabel}}</span>
+        <template x-if="edit"><input type="text" name="display_label" form="facet-edit-{{.Name}}" value="{{.DisplayLabel}}"></template>
+      </td>
+      <td>
+        <span x-show="!edit">{{.CardinalityCap}}</span>
+        <template x-if="edit"><input type="number" name="cardinality_cap" form="facet-edit-{{.Name}}" min="1" max="1000" value="{{.CardinalityCap}}"></template>
+      </td>
+      <td>{{if eq .Source ""}}{{.Kind}}{{else}}{{.Source}}{{end}}</td>
+      <td class="actions">
+        {{if .Editable}}
+          <span x-show="!edit">
+            <button type="button" class="btn" x-on:click="edit = true">Edit</button>
+            <button type="button" class="btn btn-danger"
+              hx-delete="/ui/admin/facets/{{.Name}}"
+              hx-target="#facet-table" hx-swap="innerHTML"
+              hx-confirm="Delete facet {{.Name}}?">Del</button>
+          </span>
+          <form id="facet-edit-{{.Name}}" x-show="edit" class="inline-form"
+            hx-patch="/ui/admin/facets/{{.Name}}"
+            hx-target="#facet-table" hx-swap="innerHTML"
+            x-on:htmx:after-request="edit = false">
+            <button type="submit" class="btn btn-primary">Save</button>
+            <button type="button" class="btn" x-on:click="edit = false">Cancel</button>
+          </form>
+        {{else if .CapEditable}}
+          <span x-show="!edit">
+            <button type="button" class="btn" x-on:click="edit = true">Edit cap</button>
+          </span>
+          <form id="facet-edit-{{.Name}}" x-show="edit" class="inline-form"
+            hx-patch="/ui/admin/facets/{{.Name}}"
+            hx-target="#facet-table" hx-swap="innerHTML"
+            x-on:htmx:after-request="edit = false">
+            <button type="submit" class="btn btn-primary">Save</button>
+            <button type="button" class="btn" x-on:click="edit = false">Cancel</button>
+          </form>
+        {{else}}
+          <span class="muted">—</span>
+        {{end}}
+      </td>
+    </tr>
+    {{end}}
+  </tbody>
+</table>
+{{- end}}

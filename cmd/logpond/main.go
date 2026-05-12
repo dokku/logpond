@@ -214,10 +214,15 @@ func run() error {
 		Executor:        executor,
 		Facets:          facetRegistry,
 		Jobs:            jobManager,
+		Catalog:         cat,
+		Retention:       retentionEval,
+		ArchiveBackend:  archiveBackend,
 		MaxTimeRange:    int64(maxTimeRange / time.Second),
 		FacetSampleSize: cfg.Facets.SegmentSampleSize,
+		DataDir:         cfg.DataDir,
+		RehydrationTTL:  rehydrationTTL,
 		Archive:         describeArchive(cfg, archiveBackend),
-		Retention: ui.RetentionInfo{
+		RetentionInfo: ui.RetentionInfo{
 			MaxAge:              cfg.Retention.MaxAge,
 			MaxSize:             cfg.Retention.MaxSize,
 			ArchiveBeforeDelete: cfg.Retention.ArchiveBeforeDelete,
@@ -466,8 +471,13 @@ func describeArchive(cfg *config.Config, backend archive.Backend) ui.ArchiveInfo
 	switch kind {
 	case "s3":
 		info.Detail = fmt.Sprintf("s3://%s/%s", cfg.Archive.S3.Bucket, cfg.Archive.S3.Prefix)
+		info.Endpoint = cfg.Archive.S3.Endpoint
+		info.Bucket = cfg.Archive.S3.Bucket
+		info.Prefix = cfg.Archive.S3.Prefix
 	case "script":
 		info.Detail = cfg.Archive.Script.Path
+		info.Path = cfg.Archive.Script.Path
+		info.Timeout = cfg.Archive.Script.Timeout
 	case "none":
 		info.Detail = "no archive backend configured"
 	}

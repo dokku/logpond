@@ -1,0 +1,15 @@
+{{define "fragments/admin_import_result.html" -}}
+<div class="import-result">
+  {{if .Error}}
+    <div class="inline-error">Import failed: {{.Error}}</div>
+  {{else if .OK}}
+    <p>Imported <code>{{.SegmentID}}</code> as <code>{{.State}}</code> · {{.Rows}} row(s){{if .EvictAfter}} · evicts at {{.EvictAfter}}{{end}}{{if .Persistent}} · persistent{{end}}</p>
+    {{if .Overlaps}}
+    <p class="muted">Overlapping segments:</p>
+    <ul>
+      {{range .Overlaps}}<li><code>{{.SegmentID}}</code> · {{.TimeRange}}</li>{{end}}
+    </ul>
+    {{end}}
+  {{end}}
+</div>
+{{- end}}

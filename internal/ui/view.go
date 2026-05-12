@@ -24,17 +24,197 @@ type searchPage struct {
 	InitialResults *resultsView
 }
 
-// adminPage is the body of the Admin view stub.
+// adminPage is the body of the Admin view (PRD §14.4).
 type adminPage struct {
-	Retention retentionView
-	Archive   ArchiveInfo
-	Facets    []facets.Definition
+	Retention   retentionView
+	Archive     archiveView
+	Facets      facetTableView
+	Storage     storageView
+	Segments    segmentsTableView
+	SampleSize  int
+	FacetFields []string // candidate fields for the Add-facet modal
 }
 
 type retentionView struct {
 	MaxAge              string
 	MaxSize             string
 	ArchiveBeforeDelete bool
+	LastResult          *retentionResultView
+}
+
+// retentionResultView shapes a single retention pass for the result
+// fragment.
+type retentionResultView struct {
+	DryRun    bool
+	Evaluated int
+	Actions   []retentionActionView
+	Error     string
+}
+
+type retentionActionView struct {
+	SegmentID string
+	Action    string
+	Reason    string
+	Executed  bool
+	Error     string
+}
+
+// archiveView combines static config-derived data and live probe state
+// so the admin pane can render both S3 and script variants.
+type archiveView struct {
+	Kind         string // "s3", "script", "none"
+	Detail       string
+	S3           *archiveS3View
+	Script       *archiveScriptView
+	Capabilities archiveCapsView
+	LastVerify   *verifyResultView
+	LastTest     *testInvocationView
+}
+
+type archiveS3View struct {
+	Endpoint string
+	Bucket   string
+	Prefix   string
+}
+
+type archiveScriptView struct {
+	Path    string
+	Timeout string
+}
+
+type archiveCapsView struct {
+	Archive  string // "yes" | "no" | "unknown"
+	Retrieve string
+	Verify   string
+}
+
+type verifyResultView struct {
+	Backend           string
+	Scanned           int
+	Verified          int
+	Orphaned          []string
+	Dangling          []string
+	Missing           []string
+	Failed            []verifyFailedView
+	Error             string
+}
+
+type verifyFailedView struct {
+	SegmentID string
+	ExitCode  int
+	Note      string
+}
+
+type testInvocationView struct {
+	Capabilities archiveCapsView
+	Error        string
+	Stdout       string
+	Stderr       string
+}
+
+// facetTableView wraps the list with a "kind grouping" hint the
+// template uses for editable affordances.
+type facetTableView struct {
+	Items []facetRowView
+}
+
+type facetRowView struct {
+	Name           string
+	Field          string
+	DisplayLabel   string
+	CardinalityCap int
+	ValueType      string
+	Kind           string // "builtin" or "custom"
+	Source         string // "" | "config" | "ui"
+	Editable       bool   // ui-source facets are fully editable
+	CapEditable    bool   // builtin facets can edit cap only
+}
+
+// storageView is rendered for both the initial page and the 10s
+// polling fragment.
+type storageView struct {
+	Active     storageBucket
+	Sealed     storageBucket
+	Rehydrated storageBucket
+	Archived   storageBucket
+	TotalLocal storageBucket
+	MaxSize    string
+	UpdatedAt  string
+}
+
+type storageBucket struct {
+	Count       int
+	SizeBytes   int64
+	SizeDisplay string
+}
+
+// segmentsTableView shapes the paginated segments list.
+type segmentsTableView struct {
+	Items   []segmentRowView
+	State   string // active filter
+	Offset  int
+	Limit   int
+	Total   int
+	HasPrev bool
+	HasNext bool
+	PrevURL string
+	NextURL string
+	States  []string
+}
+
+type segmentRowView struct {
+	ID         string
+	State      string
+	StateLabel string
+	TimeStart  string
+	TimeEnd    string
+	TimeRange  string
+	Rows       int64
+	RowsDisplay string
+	SizeBytes  int64
+	SizeDisplay string
+	Sources    []string
+	IsCurrent  bool
+
+	// Action shapes the per-row affordance the template renders.
+	Action segmentActionView
+}
+
+type segmentActionView struct {
+	Kind     string // "archive" | "rehydrate" | "evict" | "job" | "none"
+	JobID    string
+	Tooltip  string
+	Disabled bool
+}
+
+// jobRowView is the small fragment used to replace a segment row's
+// action cell when a job is running.
+type jobRowView struct {
+	SegmentID string
+	JobID     string
+	State     string
+	Progress  string
+	Done      bool
+	Failed    bool
+	Error     string
+}
+
+// importResultView is rendered into the import modal on success/failure.
+type importResultView struct {
+	OK         bool
+	SegmentID  string
+	State      string
+	Rows       int64
+	SizeBytes  int64
+	Overlaps   []importOverlapView
+	EvictAfter string
+	Persistent bool
+	Error      string
+}
+
+type importOverlapView struct {
+	SegmentID string
+	TimeRange string
 }
 
 // resultsView shapes /ui/query output for fragments/result_list.html.
