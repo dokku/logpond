@@ -479,6 +479,209 @@ func scanCustomFacet(r rowScanner) (CustomFacet, error) {
 	return f, nil
 }
 
+// Job state values recorded in jobs.state.
+const (
+	JobStatePending   = "pending"
+	JobStateRunning   = "running"
+	JobStateCompleted = "completed"
+	JobStateFailed    = "failed"
+)
+
+// Job mirrors a row in the jobs table (PRD §10.2).
+type Job struct {
+	ID           string
+	Type         string
+	State        string
+	PayloadJSON  string
+	ProgressJSON sql.NullString
+	ScriptStdout sql.NullString
+	ScriptStderr sql.NullString
+	StartedAt    sql.NullTime
+	FinishedAt   sql.NullTime
+	ErrorJSON    sql.NullString
+}
+
+const jobColumns = `id, type, state, payload_json, progress_json,
+        script_stdout, script_stderr, started_at, finished_at, error_json`
+
+// InsertJob writes a new jobs row. StartedAt defaults to time.Now().UTC()
+// when zero and the state is non-pending.
+func (c *Catalog) InsertJob(ctx context.Context, j Job) error {
+	_, err := c.db.ExecContext(ctx, `INSERT INTO jobs(
+        id, type, state, payload_json, progress_json,
+        script_stdout, script_stderr, started_at, finished_at, error_json
+    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		j.ID, j.Type, j.State, j.PayloadJSON, j.ProgressJSON,
+		j.ScriptStdout, j.ScriptStderr, j.StartedAt, j.FinishedAt, j.ErrorJSON,
+	)
+	if err != nil {
+		return fmt.Errorf("inserting job %s: %w", j.ID, err)
+	}
+	return nil
+}
+
+// GetJob returns the row with id. Returns sql.ErrNoRows when absent.
+func (c *Catalog) GetJob(ctx context.Context, id string) (Job, error) {
+	row := c.db.QueryRowContext(ctx, `SELECT `+jobColumns+` FROM jobs WHERE id = ?`, id)
+	return scanJob(row)
+}
+
+// JobUpdate carries patchable fields for in-flight progress updates. Nil
+// pointers leave their column unchanged.
+type JobUpdate struct {
+	State        *string
+	ProgressJSON *string
+	ScriptStdout *string
+	ScriptStderr *string
+	StartedAt    *time.Time
+	FinishedAt   *time.Time
+	ErrorJSON    *string
+}
+
+// UpdateJob applies u to the row with id. Returns sql.ErrNoRows when
+// absent.
+func (c *Catalog) UpdateJob(ctx context.Context, id string, u JobUpdate) error {
+	setParts := []string{}
+	args := []any{}
+	if u.State != nil {
+		setParts = append(setParts, "state = ?")
+		args = append(args, *u.State)
+	}
+	if u.ProgressJSON != nil {
+		setParts = append(setParts, "progress_json = ?")
+		args = append(args, sql.NullString{String: *u.ProgressJSON, Valid: *u.ProgressJSON != ""})
+	}
+	if u.ScriptStdout != nil {
+		setParts = append(setParts, "script_stdout = ?")
+		args = append(args, sql.NullString{String: *u.ScriptStdout, Valid: *u.ScriptStdout != ""})
+	}
+	if u.ScriptStderr != nil {
+		setParts = append(setParts, "script_stderr = ?")
+		args = append(args, sql.NullString{String: *u.ScriptStderr, Valid: *u.ScriptStderr != ""})
+	}
+	if u.StartedAt != nil {
+		setParts = append(setParts, "started_at = ?")
+		args = append(args, u.StartedAt.UTC())
+	}
+	if u.FinishedAt != nil {
+		setParts = append(setParts, "finished_at = ?")
+		args = append(args, u.FinishedAt.UTC())
+	}
+	if u.ErrorJSON != nil {
+		setParts = append(setParts, "error_json = ?")
+		args = append(args, sql.NullString{String: *u.ErrorJSON, Valid: *u.ErrorJSON != ""})
+	}
+	if len(setParts) == 0 {
+		return nil
+	}
+	args = append(args, id)
+	res, err := c.db.ExecContext(ctx,
+		`UPDATE jobs SET `+strings.Join(setParts, ", ")+` WHERE id = ?`, args...)
+	if err != nil {
+		return fmt.Errorf("updating job %s: %w", id, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
+// DeleteJobsOlderThan removes completed/failed jobs whose finished_at is
+// before cutoff. PRD §7.9: GC completed jobs after 7 days.
+func (c *Catalog) DeleteJobsOlderThan(ctx context.Context, cutoff time.Time) (int64, error) {
+	res, err := c.db.ExecContext(ctx,
+		`DELETE FROM jobs WHERE state IN (?, ?) AND finished_at IS NOT NULL AND finished_at < ?`,
+		JobStateCompleted, JobStateFailed, cutoff.UTC())
+	if err != nil {
+		return 0, fmt.Errorf("gc jobs: %w", err)
+	}
+	return res.RowsAffected()
+}
+
+func scanJob(r rowScanner) (Job, error) {
+	var j Job
+	if err := r.Scan(&j.ID, &j.Type, &j.State, &j.PayloadJSON, &j.ProgressJSON,
+		&j.ScriptStdout, &j.ScriptStderr, &j.StartedAt, &j.FinishedAt, &j.ErrorJSON); err != nil {
+		return Job{}, err
+	}
+	return j, nil
+}
+
+// ArchiveUpdate captures the catalog fields populated when a segment
+// finishes archiving.
+type ArchiveUpdate struct {
+	S3URL          string
+	ArchiveRef     string
+	ManifestSHA256 string
+	ParquetSHA256  string // optional - filled if the seal pass didn't record it
+}
+
+// MarkSegmentArchived records the archive outcome and transitions state
+// to archived. Local files remain on disk; retention is responsible for
+// later cleanup.
+func (c *Catalog) MarkSegmentArchived(ctx context.Context, id string, u ArchiveUpdate) error {
+	now := time.Now().UTC()
+	setParts := []string{"state = ?", "archived_at = ?"}
+	args := []any{StateArchived, now}
+	if u.S3URL != "" {
+		setParts = append(setParts, "s3_url = ?")
+		args = append(args, sql.NullString{String: u.S3URL, Valid: true})
+	}
+	if u.ArchiveRef != "" {
+		setParts = append(setParts, "archive_ref = ?")
+		args = append(args, sql.NullString{String: u.ArchiveRef, Valid: true})
+	}
+	if u.ManifestSHA256 != "" {
+		setParts = append(setParts, "manifest_sha256 = ?")
+		args = append(args, sql.NullString{String: u.ManifestSHA256, Valid: true})
+	}
+	if u.ParquetSHA256 != "" {
+		setParts = append(setParts, "parquet_sha256 = ?")
+		args = append(args, sql.NullString{String: u.ParquetSHA256, Valid: true})
+	}
+	args = append(args, id)
+	res, err := c.db.ExecContext(ctx,
+		`UPDATE segments SET `+strings.Join(setParts, ", ")+` WHERE id = ?`, args...)
+	if err != nil {
+		return fmt.Errorf("marking segment %s archived: %w", id, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return fmt.Errorf("segment %s not found", id)
+	}
+	return nil
+}
+
+// ListArchivedSegments returns segments whose archive ref or s3 url is
+// populated, ordered oldest-first.
+func (c *Catalog) ListArchivedSegments(ctx context.Context) ([]Segment, error) {
+	rows, err := c.db.QueryContext(ctx, `
+        SELECT `+segmentColumns+` FROM segments
+        WHERE (s3_url IS NOT NULL AND s3_url != '')
+           OR (archive_ref IS NOT NULL AND archive_ref != '')
+        ORDER BY time_end ASC`)
+	if err != nil {
+		return nil, fmt.Errorf("listing archived segments: %w", err)
+	}
+	defer rows.Close()
+	var out []Segment
+	for rows.Next() {
+		s, err := scanSegment(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, s)
+	}
+	return out, rows.Err()
+}
+
 // AppliedMigrations returns the versions recorded in the migrations
 // table, in ascending order. Useful for diagnostics and tests.
 func (c *Catalog) AppliedMigrations(ctx context.Context) ([]int, error) {

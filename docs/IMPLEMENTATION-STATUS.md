@@ -10,7 +10,7 @@ Tracks progress against `IMPLEMENTATION-PLAN.md`.
 - [x] Phase 5 — Datadog-style search parser
 - [x] Phase 6 — Facets and autocomplete
 - [x] Phase 7 — Retention
-- [ ] Phase 8 — Archive backend interface + S3 implementation
+- [x] Phase 8 — Archive backend interface + S3 implementation
 - [ ] Phase 9 — Script archive backend
 - [ ] Phase 10 — Rehydration and sideload
 - [ ] Phase 11 — Live tail (WebSocket)

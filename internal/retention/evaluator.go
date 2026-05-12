@@ -8,12 +8,15 @@ package retention
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"os"
+	"strings"
 	"time"
 
+	"github.com/dokku/logpond/internal/archive"
 	"github.com/dokku/logpond/internal/catalog"
 )
 
@@ -68,9 +71,8 @@ type Options struct {
 	// ProtectedWindow defaults to one hour when zero (§7.8).
 	ProtectedWindow time.Duration
 	// ArchiveBeforeDelete mirrors the config field of the same name.
-	// When true and a segment is not yet archived, the evaluator reports
-	// `archive_then_delete` but does not delete — Phase 8 wires actual
-	// archival.
+	// When true and a segment is not yet archived, the evaluator archives
+	// via Backend before deleting locally.
 	ArchiveBeforeDelete bool
 	// BackendActive is true when an archive backend is configured (i.e.
 	// `archive.backend` is not `none`). When false, archive_before_delete
@@ -78,6 +80,10 @@ type Options struct {
 	// path is to keep the segments around. Plan() still emits
 	// `archive_then_delete` actions so the operator sees the stuck state.
 	BackendActive bool
+	// Backend, when set, is invoked for `archive_then_delete` actions
+	// during Run(). Nil means archive is a no-op (Plan still reports the
+	// action; Run skips the segment).
+	Backend archive.Backend
 
 	Now    func() time.Time
 	Logger *slog.Logger
@@ -138,21 +144,97 @@ func (e *Evaluator) Run(ctx context.Context, dryRun bool) (Result, error) {
 	}
 	for i := range r.Actions {
 		a := &r.Actions[i]
-		if a.Action != ActionDelete {
-			// archive_then_delete actions wait for Phase 8 to wire the
-			// archive backend. The next retention cycle picks them up
-			// once archived_at is populated.
-			continue
+		switch a.Action {
+		case ActionDelete:
+			if err := e.execute(ctx, a); err != nil {
+				a.Error = err.Error()
+				e.opts.Logger.Warn("retention: delete failed",
+					"segment_id", a.SegmentID, "err", err)
+				continue
+			}
+			a.Executed = true
+		case ActionArchiveThenDelete:
+			if e.opts.Backend == nil {
+				// No backend wired: leave the segment in sealed state
+				// for the operator to act on. Plan already surfaced this.
+				continue
+			}
+			if err := e.archiveThenDelete(ctx, a); err != nil {
+				a.Error = err.Error()
+				e.opts.Logger.Warn("retention: archive_then_delete failed",
+					"segment_id", a.SegmentID, "err", err)
+				continue
+			}
+			a.Executed = true
 		}
-		if err := e.execute(ctx, a); err != nil {
-			a.Error = err.Error()
-			e.opts.Logger.Warn("retention: delete failed",
-				"segment_id", a.SegmentID, "err", err)
-			continue
-		}
-		a.Executed = true
 	}
 	return r, nil
+}
+
+// archiveThenDelete runs the configured backend's Archive against the
+// segment, then deletes the local copy. On any archive failure the
+// segment stays in sealed state with the local file intact, ready for
+// the next retention cycle to retry.
+func (e *Evaluator) archiveThenDelete(ctx context.Context, a *Action) error {
+	seg, err := e.opts.Catalog.GetSegment(ctx, a.SegmentID)
+	if err != nil {
+		return fmt.Errorf("loading segment: %w", err)
+	}
+	if !seg.LocalPath.Valid || seg.LocalPath.String == "" {
+		return fmt.Errorf("segment %s missing local_path", a.SegmentID)
+	}
+	parquetSHA := ""
+	if seg.ParquetSHA256.Valid {
+		parquetSHA = seg.ParquetSHA256.String
+	}
+	sources := []string{}
+	if seg.SourceNames.Valid && seg.SourceNames.String != "" {
+		if strings.HasPrefix(strings.TrimSpace(seg.SourceNames.String), "[") {
+			if err := json.Unmarshal([]byte(seg.SourceNames.String), &sources); err != nil {
+				e.opts.Logger.Warn("retention: bad source_names", "segment_id", seg.ID, "err", err)
+				sources = nil
+			}
+		}
+	}
+	ref := archive.SegmentRef{
+		ID:            seg.ID,
+		TimeStart:     seg.TimeStart,
+		TimeEnd:       seg.TimeEnd,
+		RowCount:      seg.RowCount,
+		SizeBytes:     seg.SizeBytes,
+		ParquetPath:   seg.LocalPath.String,
+		ParquetSHA256: parquetSHA,
+		SourceNames:   sources,
+	}
+	res, err := e.opts.Backend.Archive(ctx, ref)
+	if err != nil {
+		return fmt.Errorf("archive: %w", err)
+	}
+	upd := catalog.ArchiveUpdate{
+		S3URL:          res.S3URL,
+		ArchiveRef:     res.ArchiveRef,
+		ManifestSHA256: res.ManifestSHA256,
+		ParquetSHA256:  res.ParquetSHA256,
+	}
+	if err := e.opts.Catalog.MarkSegmentArchived(ctx, seg.ID, upd); err != nil {
+		return fmt.Errorf("catalog archive update: %w", err)
+	}
+	// Now drop the local file. Failure here is logged but doesn't roll
+	// back the archive — the segment is safely in S3.
+	if err := os.Remove(seg.LocalPath.String); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("removing %s: %w", seg.LocalPath.String, err)
+	}
+	if err := e.opts.Catalog.ClearLocalFile(ctx, seg.ID, catalog.StateArchived); err != nil {
+		return err
+	}
+	e.opts.Logger.Info("retention: archived and deleted",
+		"segment_id", seg.ID,
+		"reason", a.Reason,
+		"s3_url", res.S3URL,
+		"archive_ref", res.ArchiveRef,
+	)
+	a.NextState = catalog.StateArchived
+	return nil
 }
 
 

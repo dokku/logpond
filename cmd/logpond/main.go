@@ -16,11 +16,17 @@ import (
 	"syscall"
 	"time"
 
+	awscfg "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
+
 	"github.com/dokku/logpond/internal/api"
+	"github.com/dokku/logpond/internal/archive"
 	"github.com/dokku/logpond/internal/catalog"
 	"github.com/dokku/logpond/internal/config"
 	"github.com/dokku/logpond/internal/facets"
 	"github.com/dokku/logpond/internal/ingest"
+	"github.com/dokku/logpond/internal/jobs"
 	"github.com/dokku/logpond/internal/metrics"
 	"github.com/dokku/logpond/internal/query"
 	"github.com/dokku/logpond/internal/retention"
@@ -159,9 +165,19 @@ func run() error {
 		logger.Warn("facet registry warning", "msg", warn)
 	}
 
-	retentionEval, retentionInterval, err := buildRetention(cfg, cat, logger)
+	archiveBackend, err := buildArchiveBackend(ctx, cfg, logger)
+	if err != nil {
+		return fmt.Errorf("configuring archive backend: %w", err)
+	}
+
+	retentionEval, retentionInterval, err := buildRetention(cfg, cat, archiveBackend, logger)
 	if err != nil {
 		return fmt.Errorf("configuring retention: %w", err)
+	}
+
+	jobManager, err := jobs.New(jobs.Options{Catalog: cat, Logger: logger})
+	if err != nil {
+		return fmt.Errorf("configuring jobs manager: %w", err)
 	}
 
 	srv := api.New(api.Options{
@@ -172,6 +188,9 @@ func run() error {
 		Executor:        executor,
 		Facets:          facetRegistry,
 		Retention:       retentionEval,
+		Catalog:         cat,
+		ArchiveBackend:  archiveBackend,
+		Jobs:            jobManager,
 		MaxTimeRange:    maxTimeRange,
 		FacetSampleSize: cfg.Facets.SegmentSampleSize,
 	})
@@ -199,6 +218,12 @@ func run() error {
 	go func() {
 		defer wg.Done()
 		retentionEval.RunLoop(ctx, retentionInterval)
+	}()
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		jobManager.RunGCLoop(ctx, 0)
 	}()
 
 	wg.Add(1)
@@ -252,7 +277,7 @@ func newLogger(level string) *slog.Logger {
 // ready-to-run evaluator alongside the desired loop interval. An empty
 // policy still yields a valid Evaluator; RunLoop blocks until ctx ends
 // without doing any work in that case.
-func buildRetention(cfg *config.Config, cat *catalog.Catalog, logger *slog.Logger) (*retention.Evaluator, time.Duration, error) {
+func buildRetention(cfg *config.Config, cat *catalog.Catalog, backend archive.Backend, logger *slog.Logger) (*retention.Evaluator, time.Duration, error) {
 	var maxAge time.Duration
 	if cfg.Retention.MaxAge != "" {
 		d, err := config.ParseDuration(cfg.Retention.MaxAge)
@@ -279,18 +304,63 @@ func buildRetention(cfg *config.Config, cat *catalog.Catalog, logger *slog.Logge
 			interval = d
 		}
 	}
+	backendActive := backend != nil && backend.Capabilities().Name != "none"
 	eval, err := retention.New(retention.Options{
 		Catalog:             cat,
 		MaxAge:              maxAge,
 		MaxSize:             maxSize,
 		ArchiveBeforeDelete: cfg.Retention.ArchiveBeforeDelete,
-		BackendActive:       cfg.Archive.Backend != "" && cfg.Archive.Backend != "none",
+		BackendActive:       backendActive,
+		Backend:             backend,
 		Logger:              logger,
 	})
 	if err != nil {
 		return nil, 0, err
 	}
 	return eval, interval, nil
+}
+
+// buildArchiveBackend instantiates the configured archive backend.
+// archive.backend=none returns a NoneBackend; s3 builds a real client
+// using the AWS SDK. The script backend is wired in Phase 9.
+func buildArchiveBackend(ctx context.Context, cfg *config.Config, logger *slog.Logger) (archive.Backend, error) {
+	switch cfg.Archive.Backend {
+	case "", "none":
+		return archive.NoneBackend{}, nil
+	case "s3":
+		loadOpts := []func(*awscfg.LoadOptions) error{}
+		if cfg.Archive.S3.Region != "" {
+			loadOpts = append(loadOpts, awscfg.WithRegion(cfg.Archive.S3.Region))
+		}
+		if cfg.Archive.S3.AccessKeyID != "" && cfg.Archive.S3.SecretAccessKey != "" {
+			loadOpts = append(loadOpts, awscfg.WithCredentialsProvider(
+				credentials.NewStaticCredentialsProvider(cfg.Archive.S3.AccessKeyID, cfg.Archive.S3.SecretAccessKey, "")))
+		}
+		awsCfg, err := awscfg.LoadDefaultConfig(ctx, loadOpts...)
+		if err != nil {
+			return nil, fmt.Errorf("loading aws config: %w", err)
+		}
+		client := s3.NewFromConfig(awsCfg, func(o *s3.Options) {
+			if cfg.Archive.S3.Endpoint != "" {
+				o.BaseEndpoint = &cfg.Archive.S3.Endpoint
+				o.UsePathStyle = true
+			}
+		})
+		return archive.NewS3Backend(archive.S3Options{
+			Client: client,
+			Bucket: cfg.Archive.S3.Bucket,
+			Prefix: cfg.Archive.S3.Prefix,
+			Logger: logger,
+		})
+	case "script":
+		// Phase 9 implements the script backend; until then, fall back to
+		// none so the binary still boots with `backend: script` in the
+		// config without surfacing wiring errors.
+		logger.Warn("archive: script backend not yet implemented; using none")
+		return archive.NoneBackend{}, nil
+	default:
+		return nil, fmt.Errorf("unsupported archive backend %q", cfg.Archive.Backend)
+	}
 }
 
 // ringBufferEventCap converts the configured ring-buffer memory limit

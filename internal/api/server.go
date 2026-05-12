@@ -15,8 +15,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dokku/logpond/internal/archive"
+	"github.com/dokku/logpond/internal/catalog"
 	"github.com/dokku/logpond/internal/facets"
 	"github.com/dokku/logpond/internal/ingest"
+	"github.com/dokku/logpond/internal/jobs"
 	"github.com/dokku/logpond/internal/metrics"
 	"github.com/dokku/logpond/internal/query"
 	"github.com/dokku/logpond/internal/retention"
@@ -40,6 +43,9 @@ type Server struct {
 	executor        *query.Executor
 	facets          *facets.Registry
 	retention       *retention.Evaluator
+	catalog         *catalog.Catalog
+	archiveBackend  archive.Backend
+	jobs            *jobs.Manager
 	maxTimeRange    time.Duration
 	facetSampleSize int
 }
@@ -58,6 +64,9 @@ type Options struct {
 	Executor        *query.Executor
 	Facets          *facets.Registry
 	Retention       *retention.Evaluator
+	Catalog         *catalog.Catalog
+	ArchiveBackend  archive.Backend
+	Jobs            *jobs.Manager
 	MaxTimeRange    time.Duration
 	FacetSampleSize int
 }
@@ -80,6 +89,9 @@ func New(opts Options) *Server {
 		executor:        opts.Executor,
 		facets:          opts.Facets,
 		retention:       opts.Retention,
+		catalog:         opts.Catalog,
+		archiveBackend:  opts.ArchiveBackend,
+		jobs:            opts.Jobs,
 		maxTimeRange:    opts.MaxTimeRange,
 		facetSampleSize: opts.FacetSampleSize,
 	}
@@ -95,6 +107,9 @@ func New(opts Options) *Server {
 	r.Patch("/api/facets/{name}", s.handlePatchFacet)
 	r.Delete("/api/facets/{name}", s.handleDeleteFacet)
 	r.Post("/api/admin/retention/run", s.handleRetentionRun)
+	r.Post("/api/archive", s.handleArchive)
+	r.Post("/api/admin/archive/verify", s.handleArchiveVerify)
+	r.Get("/api/jobs/{id}", s.handleGetJob)
 
 	return s
 }

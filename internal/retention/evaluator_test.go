@@ -3,6 +3,7 @@ package retention
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"io"
 	"log/slog"
 	"os"
@@ -10,8 +11,42 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dokku/logpond/internal/archive"
 	"github.com/dokku/logpond/internal/catalog"
 )
+
+// fakeBackend captures the calls the evaluator makes; it always
+// succeeds and reports an s3:// URL derived from the segment ref so
+// MarkSegmentArchived has something concrete to write.
+type fakeBackend struct {
+	calls    []string
+	failNext bool
+}
+
+func (f *fakeBackend) Capabilities() archive.Capabilities {
+	return archive.Capabilities{Archive: true, Retrieve: true, Verify: true, Name: "fake"}
+}
+
+func (f *fakeBackend) Archive(_ context.Context, ref archive.SegmentRef) (archive.ArchiveResult, error) {
+	f.calls = append(f.calls, ref.ID)
+	if f.failNext {
+		f.failNext = false
+		return archive.ArchiveResult{}, errors.New("injected archive failure")
+	}
+	return archive.ArchiveResult{
+		S3URL:          "s3://bucket/segments/" + ref.ID + ".parquet",
+		ParquetSHA256:  ref.ParquetSHA256,
+		ManifestSHA256: "manifest-sha-" + ref.ID,
+	}, nil
+}
+
+func (f *fakeBackend) Retrieve(context.Context, archive.SegmentRef, string) (archive.RetrieveResult, error) {
+	return archive.RetrieveResult{}, archive.ErrUnsupported
+}
+
+func (f *fakeBackend) Verify(context.Context, []string) (archive.VerifyResult, error) {
+	return archive.VerifyResult{Backend: "fake"}, nil
+}
 
 // fixedNow returns a clock that always reports t.
 func fixedNow(t time.Time) func() time.Time { return func() time.Time { return t } }
@@ -342,6 +377,114 @@ func TestEvaluator_ArchivedSegment_DeletesFileButKeepsArchive(t *testing.T) {
 	}
 	if !s.S3URL.Valid {
 		t.Errorf("s3_url should be retained, got %+v", s.S3URL)
+	}
+}
+
+func TestEvaluator_ArchiveBeforeDelete_RunsBackendThenDeletes(t *testing.T) {
+	now := time.Date(2026, 5, 12, 12, 0, 0, 0, time.UTC)
+	c := openCatalog(t)
+
+	dir := t.TempDir()
+	file := filepath.Join(dir, "segment.parquet")
+	if err := os.WriteFile(file, []byte("data"), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	insertSegment(t, c, "old", now.Add(-72*time.Hour), segOpts{localPath: file})
+
+	backend := &fakeBackend{}
+	e, err := New(Options{
+		Catalog:             c,
+		MaxAge:              24 * time.Hour,
+		ArchiveBeforeDelete: true,
+		BackendActive:       true,
+		Backend:             backend,
+		Now:                 fixedNow(now),
+		Logger:              silentLogger(),
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	r, err := e.Run(context.Background(), false)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(r.Actions) != 1 {
+		t.Fatalf("expected one action, got %+v", r.Actions)
+	}
+	a := r.Actions[0]
+	if a.Action != ActionArchiveThenDelete {
+		t.Fatalf("expected archive_then_delete verb, got %s", a.Action)
+	}
+	if !a.Executed {
+		t.Fatalf("expected action to execute with backend wired, action=%+v", a)
+	}
+	if len(backend.calls) != 1 || backend.calls[0] != "old" {
+		t.Fatalf("expected backend to receive segment old, got %v", backend.calls)
+	}
+	// Local file gone, catalog state archived with s3_url populated.
+	if _, err := os.Stat(file); !os.IsNotExist(err) {
+		t.Errorf("expected local file removed, stat err=%v", err)
+	}
+	s, err := c.GetSegment(context.Background(), "old")
+	if err != nil {
+		t.Fatalf("GetSegment: %v", err)
+	}
+	if s.State != catalog.StateArchived {
+		t.Errorf("expected archived state, got %s", s.State)
+	}
+	if !s.S3URL.Valid || s.S3URL.String == "" {
+		t.Errorf("expected s3_url populated, got %+v", s.S3URL)
+	}
+	if s.LocalPath.Valid {
+		t.Errorf("expected local_path cleared, got %+v", s.LocalPath)
+	}
+}
+
+func TestEvaluator_ArchiveFailure_LeavesSegmentSealed(t *testing.T) {
+	now := time.Date(2026, 5, 12, 12, 0, 0, 0, time.UTC)
+	c := openCatalog(t)
+
+	dir := t.TempDir()
+	file := filepath.Join(dir, "segment.parquet")
+	if err := os.WriteFile(file, []byte("data"), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	insertSegment(t, c, "old", now.Add(-72*time.Hour), segOpts{localPath: file})
+
+	backend := &fakeBackend{failNext: true}
+	e, err := New(Options{
+		Catalog:             c,
+		MaxAge:              24 * time.Hour,
+		ArchiveBeforeDelete: true,
+		BackendActive:       true,
+		Backend:             backend,
+		Now:                 fixedNow(now),
+		Logger:              silentLogger(),
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	r, err := e.Run(context.Background(), false)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(r.Actions) != 1 || r.Actions[0].Executed {
+		t.Fatalf("expected unexecuted action, got %+v", r.Actions)
+	}
+	if r.Actions[0].Error == "" {
+		t.Errorf("expected error to be captured on the action")
+	}
+	if _, err := os.Stat(file); err != nil {
+		t.Errorf("expected file to remain on archive failure, stat err=%v", err)
+	}
+	s, err := c.GetSegment(context.Background(), "old")
+	if err != nil {
+		t.Fatalf("GetSegment: %v", err)
+	}
+	if s.State != catalog.StateSealed {
+		t.Errorf("expected segment to remain sealed, got %s", s.State)
 	}
 }
 

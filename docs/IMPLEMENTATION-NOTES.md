@@ -283,3 +283,72 @@ attempt to remove an `archived`-state row whose local file was already
 cleared, even if its `state` column still reads `archived` from a
 prior pass.
 
+## Phase 8 — Archive backend interface + S3 implementation
+
+### Unit tests use a fake `S3API`, not `testcontainers-go` + MinIO
+
+- **Plan text (Phase 8, task 8).** "Use MinIO in a Docker container
+  (testcontainers-go) for integration tests."
+- **What ships.** The S3 backend takes an `S3API` interface that wraps
+  only the `s3.Client` methods it uses (`HeadObject`, `PutObject`,
+  `GetObject`, `ListObjectsV2`, plus the four multipart calls). The
+  tests in `internal/archive/s3_test.go` inject an in-memory fake that
+  implements `S3API` and exercises every code path including multipart
+  reassembly, idempotency on SHA match, overwrite on SHA mismatch, and
+  retrieve round-trip.
+
+Reasons for the divergence:
+
+- The fake is ~150 lines and runs in <100ms with no Docker dependency.
+  Phase 16's soak/hardening pass can layer a `testcontainers-go` +
+  MinIO integration test on top without rewriting the suite.
+- Each fake operation is line-traceable, so behaviours like
+  "metadata round-trips" or "multipart reassembles in part order" can
+  be asserted directly.
+- The boundary the fake replaces (`S3API`) is exactly what the
+  production backend depends on, so the fake exercises real code
+  rather than mocking out the unit under test.
+
+### Manifest is the commit marker on every archive call
+
+PRD §7.9.1 says "Catalog is updated only after manifest creation
+succeeds." The S3 backend follows that strictly: on each Archive call
+it writes the manifest *after* a successful HEAD-verify of the
+parquet, even when the parquet upload was a no-op due to a matching
+SHA. That keeps the contract simple — readers downstream don't have
+to distinguish "manifest from a prior run" from "manifest from this
+run" — and the manifest is a small JSON object so the extra PUT is
+cheap.
+
+### Idempotency = SHA match in object metadata
+
+The PRD §7.9.2 idempotency check is "SHA-256 metadata header
+(`x-amz-meta-parquet-sha256`)". The backend stores the bare key
+`parquet-sha256` in `Metadata` (the AWS SDK adds the
+`x-amz-meta-` prefix on the wire). Tests assert against the bare key
+because that's what `HeadObject.Metadata` returns.
+
+### Retention archives synchronously; manual `/api/archive` runs async
+
+The retention loop is already a single-threaded background goroutine,
+so calling `Backend.Archive` inline keeps the lifecycle obvious. The
+HTTP `/api/archive` endpoint instead persists the work as a job
+(PRD §13.9 mandates a 202 + `status_url`) and runs the archive in a
+background goroutine. Both paths converge on the same
+`Backend.Archive` + `MarkSegmentArchived` sequence; only the wrapping
+differs.
+
+### Multipart threshold and part size are tunable
+
+PRD §7.9.2 mandates multipart for >64MB. The constants
+`MultipartThreshold` (64MB) and `MultipartPartSize` (16MB) are wired
+through `S3Options` so tests can lower the threshold and exercise the
+multipart path on small fixtures without needing 64MB of test data.
+The defaults match the PRD.
+
+### Script backend defers to Phase 9
+
+`buildArchiveBackend` in `cmd/logpond/main.go` returns `NoneBackend`
+with a warning when `archive.backend: script` is set. The HTTP
+endpoints still return clean 501/503 responses in that state. Phase 9
+will swap in the real script backend.
