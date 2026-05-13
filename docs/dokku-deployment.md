@@ -113,22 +113,55 @@ open https://logpond.example.com/
 
 ## 2. Wire Dokku to ship logs to Logpond
 
-### Step 1: set the Vector sink
+You have two routing choices: ship to Logpond's internal Dokku alias (preferred - traffic stays on the host) or ship to its public hostname (used when something off-host also needs to ingest into the same source). The mechanics are nearly identical; only the `uri=` part of the Vector sink DSN differs.
 
-Dokku's `vector-sink` uses a DSN-style URL that encodes the destination plus encoding and batching options. Point it at Logpond's `/ingest/dokku` endpoint:
+### Step 1 (recommended): route Vector internally
+
+This path requires **Dokku >= 0.38.5**, which added a `vector-networks` config knob so the Vector container can declaratively join a shared Docker network with Logpond. Older Dokku versions either ship logs through the public hostname (Step 1, alternative) or upgrade.
+
+Put both Logpond and Vector on a shared network, then point the Vector sink at Logpond's internal alias:
+
+```bash
+dokku network:create dokku-logs
+dokku network:set logpond initial-network dokku-logs    # survives rebuilds
+dokku logs:set --global vector-networks dokku-logs      # global only; rejected at app level
+dokku logs:vector-stop                                  # cycle so compose re-renders
+dokku logs:vector-start
+```
+
+```bash
+dokku logs:set --global vector-sink \
+  "http://?uri=http://logpond.web:8080/ingest/dokku&encoding[codec]=json&framing[method]=newline_delimited&compression=gzip&batch[max_events]=500&batch[timeout_secs]=1"
+```
+
+`logpond.web` is Dokku's internal DNS alias for the `web` process of the Logpond app, available on any custom non-bridge network. `8080` is Logpond's listen port (`EXPOSE 8080` in the Dockerfile, default `LOGPOND_PORT=8080`). Confirm with `dokku config:get logpond LOGPOND_PORT` if it has been overridden.
+
+**A caveat to know.** When `vector-networks` is set, Vector leaves the default `bridge` network entirely - Docker compose can't combine `bridge` with user-defined networks in one config. Outbound to external sinks still works through the user-defined network's NAT, so Datadog, Better Stack, or any hosted HTTP sink remain reachable. Operators using a Vector sink whose hostname only resolves on the default bridge need to either put that destination on the shared network or stay on Step 1's alternative.
+
+### Step 1 (alternative): route Vector through the public hostname
+
+When you also need to accept ingest from a remote producer (a CI runner, a remote app) into the same `dokku` source, route Vector through Logpond's public URL instead. Traffic round-trips through Dokku's external nginx, which is wasted bandwidth on-host but means one URL handles every producer:
 
 ```bash
 dokku logs:set --global vector-sink \
   "http://?uri=http://logpond.example.com/ingest/dokku&encoding[codec]=json&framing[method]=newline_delimited&compression=gzip&batch[max_events]=500&batch[timeout_secs]=1"
 ```
 
-What each option does:
+In this mode, configure ingest tokens on the source so the public endpoint is not unauthenticated (see [Authenticating ingest with bearer tokens](sources-and-extraction.md#authenticating-ingest-with-bearer-tokens)). The Vector sink encodes a header via `request[headers]`:
 
-- `uri=http://logpond.example.com/ingest/dokku` - the ingest endpoint. The `/dokku` suffix matches the source name in `LOGPOND_SOURCES_JSON`.
+```bash
+dokku logs:set --global vector-sink \
+  "http://?uri=https://logpond.example.com/ingest/dokku&encoding[codec]=json&framing[method]=newline_delimited&compression=gzip&batch[max_events]=500&batch[timeout_secs]=1&request[headers][authorization]=Bearer%20lpk_live_..."
+```
+
+**What each DSN option does:**
+
+- `uri=...` - the ingest endpoint. The `/dokku` suffix matches the source name in `LOGPOND_SOURCES_JSON`.
 - `encoding[codec]=json` - emit JSON, one object per event.
 - `framing[method]=newline_delimited` - join events with newlines (NDJSON).
 - `compression=gzip` - compress each batch. Vector sets the `Content-Encoding` header; Logpond decompresses automatically.
-- `batch[max_events]=500` and `batch[timeout_secs]=1` - send a batch every 500 events or every second, whichever comes first. Those numbers keep request rate manageable while staying close to real-time.
+- `batch[max_events]=500` and `batch[timeout_secs]=1` - send a batch every 500 events or every second, whichever comes first.
+- `request[headers][authorization]=...` - URL-encode the bearer header (`Bearer%20<token>`). Only needed when the source has tokens configured.
 
 Use `--global` to apply to every app on the host, or set per-app to be selective.
 
@@ -137,6 +170,8 @@ Use `--global` to apply to every app on the host, or set per-app to be selective
 ```bash
 dokku logs:vector-start
 ```
+
+(Skip this step if you already cycled Vector during Step 1's internal-routing setup.)
 
 This launches the Vector container managed by Dokku. It survives restarts of individual apps.
 
@@ -147,7 +182,7 @@ dokku logs:vector-logs --tail
 curl https://logpond.example.com/metrics | grep logpond_ingest
 ```
 
-In the Search view, set the time range to "Last 15 minutes" and you should see events with `service` set to your Dokku app names.
+In the Search view, set the time range to "Last 15 minutes" and you should see events with `service` set to your Dokku app names. If you took Step 1's internal-routing path, Logpond's nginx access log should show zero ingest traffic - everything stays on the shared Docker network.
 
 ## 3. Avoid the Logpond -> Logpond feedback loop
 

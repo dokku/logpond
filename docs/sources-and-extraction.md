@@ -140,6 +140,51 @@ sources:
 
 The `container_name` field is not part of the core five, so it remains in `attributes`. You can still filter on it with `@container_name:web*` in the search bar, and you can promote it to a sidebar facet by declaring it as a custom facet. See [Dokku Deployment](dokku-deployment.md) for the full Vector-plus-Logpond integration.
 
+## Authenticating ingest with bearer tokens
+
+Sources accept unauthenticated POSTs by default - the assumption is that Vector lives on the same host and reaches Logpond over an internal address. If you want to expose `/ingest/<source>` publicly, attach one or more bearer tokens to the source. Sources without tokens stay open.
+
+```yaml
+sources:
+  - name: public
+    ingest_tokens:
+      - "lpk_live_4f8a..."
+      - "lpk_live_9c3b..."   # rotation overlap - both valid during cutover
+    extract: { ... }
+```
+
+Requests must present `Authorization: Bearer <token>` whose value matches one of the configured tokens. Mismatches and missing headers get `401 unauthorized` with `WWW-Authenticate: Bearer`. Comparison is constant-time, so the number of configured tokens does not leak through timing.
+
+Generate a token with the bundled subcommand (32 base64-url characters, `lpk_live_` prefix):
+
+```bash
+docker run --rm ghcr.io/dokku/logpond:latest gen-token
+# -> lpk_live_<random>
+```
+
+The prefix is a convention, not a requirement. Operators can use any non-empty string with no internal whitespace. The prefix makes leaked tokens easy to spot in logs and code search.
+
+For Dokku setups, a single token can also be set via env var (the file-based form is the right knob for hot rotation - see below):
+
+```bash
+dokku config:set logpond LOGPOND_INGEST_TOKEN__public=lpk_live_4f8a...
+dokku config:set logpond LOGPOND_INGEST_TOKEN__public=lpk_live_4f8a,lpk_live_9c3b   # comma-separated
+```
+
+**Rotation, hot.** Tokens live in the YAML file's `sources[].ingest_tokens` list. Edit the file (the recommended Dokku setup mounts it via `dokku storage:mount` so the host path is the same as the container path), add a new token alongside the old, then:
+
+```bash
+curl -X POST http://localhost:8080/api/admin/reload
+```
+
+The new token is accepted immediately. Update your producer to use it, then remove the old token from the file and reload again.
+
+**Rotation, env-only.** Tokens supplied through `LOGPOND_INGEST_TOKEN__<source>` are read at process start and **cannot hot-rotate**. A Linux process's environment is fixed at `execve` time, so `dokku config:set --no-restart` updates the stored value on disk but not the running container's namespace. Rotating an env-set token requires `dokku ps:restart`. Use the file-based form whenever zero-downtime rotation matters.
+
+**Failure logging.** Logpond emits a rate-limited (one per minute per source) warning log on each authentication failure, carrying the source name and the first six characters of the offered token as a fingerprint. Successful auth is silent. The Prometheus counter `logpond_ingest_auth_failures_total{source}` increments on every 401 so you can alert on unexpected probes.
+
+**Redaction.** Configured tokens are blanked as `***` in both startup config logs and `GET /api/admin/config`. They are not safe to read from the running config; treat the YAML file's permissions (`0600`, owned by the runtime user) as the boundary.
+
 ## Adding or changing sources
 
 The `sources` config key is reloadable. After editing the YAML or changing `LOGPOND_SOURCES_JSON`, hit `POST /api/admin/reload`:

@@ -100,6 +100,8 @@ The **Reloadable** column says whether changing the value at runtime via `POST /
 | `archive.script.timeout`                | `LOGPOND_ARCHIVE_SCRIPT_TIMEOUT`           | `600s`               | Yes        |
 | `archive.script.env.*`                  | `LOGPOND_ARCHIVE_SCRIPT_ENV__*`            | (none)               | Yes        |
 | `sources`                               | `LOGPOND_SOURCES_JSON`                     | one `default` source | Yes        |
+| `sources[].ingest_tokens`               | (see `LOGPOND_INGEST_TOKEN__*` below)      | (none)               | Yes        |
+| (n/a)                                   | `LOGPOND_INGEST_TOKEN__<source>`           | (none)               | No         |
 | `theme.default`                         | `LOGPOND_THEME_DEFAULT`                    | `auto`               | Yes        |
 
 A few of these need elaboration:
@@ -111,6 +113,8 @@ A few of these need elaboration:
 - **`query.max_time_range`** caps the span of a single query. The default of seven days is a safety net against accidental "show me everything" queries.
 - **`retention.max_age` and `retention.max_size`** are independent. If both are set, whichever is hit first triggers archival or deletion. At least one is required for retention to do anything; leave both unset and Logpond will grow until the disk fills. See [Retention](retention.md).
 - **`archive.backend`** is one of `none`, `s3`, or `script` and is the only archive-related setting that requires a restart. The rest (credentials, endpoints, script paths) hot-reload, which is convenient for credential rotation.
+- **`sources[].ingest_tokens`** opts a source into bearer-token auth on `POST /ingest/<source>`. An empty list (or omitted field) keeps the source unauthenticated, preserving the local-Vector default. See [Sources and Extraction](sources-and-extraction.md#authenticating-ingest-with-bearer-tokens) for the full rotation flow.
+- **`LOGPOND_INGEST_TOKEN__<source>`** is a flat env-var sidecar for the bootstrap / single-token case. It accepts a single token or a comma-separated list and appends to whatever the YAML defines (deduped). Set-at-startup-only: rotating an env-set token requires a restart, because a Linux process's environment is fixed at exec time. For hot rotation, put tokens in the YAML file and reload.
 
 ## Reloading config without a restart
 

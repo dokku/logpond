@@ -119,8 +119,12 @@ type Script struct {
 }
 
 type Source struct {
-	Name    string              `yaml:"name" json:"name"`
-	Extract map[string][]string `yaml:"extract" json:"extract"`
+	Name string `yaml:"name" json:"name"`
+	// IngestTokens, if non-empty, requires every POST to /ingest/<name>
+	// to present a matching `Authorization: Bearer <token>`. An empty
+	// list preserves the local-Vector default (no auth). See PRD §7.1.5.
+	IngestTokens []string            `yaml:"ingest_tokens" json:"ingest_tokens,omitempty"`
+	Extract      map[string][]string `yaml:"extract" json:"extract"`
 }
 
 type Theme struct {
@@ -251,7 +255,64 @@ func applyEnv(c *Config) error {
 		}
 		c.Archive.Script.Env[key] = val
 	}
+
+	const ingestTokenPrefix = EnvPrefix + "INGEST_TOKEN__"
+	for _, kv := range os.Environ() {
+		if !strings.HasPrefix(kv, ingestTokenPrefix) {
+			continue
+		}
+		rest := kv[len(ingestTokenPrefix):]
+		eq := strings.IndexByte(rest, '=')
+		if eq <= 0 {
+			continue
+		}
+		sourceName, val := rest[:eq], rest[eq+1:]
+		// PRD §7.1.5: env-supplied tokens are a comma-separated list
+		// that appends to the YAML list (deduped). The source must
+		// already exist in the config; an env var for an unknown
+		// source is ignored at load time and surfaced in validation.
+		var tokens []string
+		for _, t := range strings.Split(val, ",") {
+			t = strings.TrimSpace(t)
+			if t != "" {
+				tokens = append(tokens, t)
+			}
+		}
+		idx := -1
+		for i := range c.Sources {
+			if c.Sources[i].Name == sourceName {
+				idx = i
+				break
+			}
+		}
+		if idx < 0 {
+			// Stage as a phantom source so Validate() can complain
+			// with a clear message rather than silently dropping.
+			c.Sources = append(c.Sources, Source{Name: sourceName, IngestTokens: tokens})
+			continue
+		}
+		c.Sources[idx].IngestTokens = mergeTokens(c.Sources[idx].IngestTokens, tokens)
+	}
 	return nil
+}
+
+// mergeTokens appends b to a while dropping any token already present
+// in a (preserving order). Used to combine YAML-supplied tokens with
+// env-var-supplied tokens.
+func mergeTokens(a, b []string) []string {
+	seen := make(map[string]struct{}, len(a))
+	for _, t := range a {
+		seen[t] = struct{}{}
+	}
+	out := append([]string(nil), a...)
+	for _, t := range b {
+		if _, ok := seen[t]; ok {
+			continue
+		}
+		seen[t] = struct{}{}
+		out = append(out, t)
+	}
+	return out
 }
 
 func walkEnv(v reflect.Value, prefix string) error {
@@ -443,6 +504,15 @@ func (c *Config) Validate() error {
 			errs = append(errs, fmt.Sprintf("sources[%d].name: duplicate of sources[%d]", i, prev))
 		}
 		seen[s.Name] = i
+		for j, tok := range s.IngestTokens {
+			if tok == "" {
+				errs = append(errs, fmt.Sprintf("sources[%d].ingest_tokens[%d]: empty token", i, j))
+				continue
+			}
+			if strings.ContainsAny(tok, " \t\r\n") {
+				errs = append(errs, fmt.Sprintf("sources[%d].ingest_tokens[%d]: contains whitespace", i, j))
+			}
+		}
 	}
 
 	switch c.Archive.Backend {
@@ -523,6 +593,20 @@ func (c *Config) Redacted() *Config {
 			env[k] = "***"
 		}
 		cp.Archive.Script.Env = env
+	}
+	if len(cp.Sources) > 0 {
+		srcs := make([]Source, len(cp.Sources))
+		for i, s := range cp.Sources {
+			srcs[i] = s
+			if len(s.IngestTokens) > 0 {
+				redacted := make([]string, len(s.IngestTokens))
+				for j := range s.IngestTokens {
+					redacted[j] = "***"
+				}
+				srcs[i].IngestTokens = redacted
+			}
+		}
+		cp.Sources = srcs
 	}
 	return &cp
 }

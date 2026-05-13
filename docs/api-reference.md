@@ -20,7 +20,7 @@ These `/api/*` endpoints are the supported public contract for scripting. The we
   }
   ```
 
-  Stable error codes: `unknown_source`, `invalid_filter`, `invalid_query_syntax`, `filter_too_deep`, `invalid_time_range`, `time_range_too_large`, `buffer_full`, `segment_not_found`, `segment_busy`, `s3_unavailable`, `script_unavailable`, `rehydrate_unsupported`, `manifest_invalid`, `cursor_invalidated`, `field_not_reloadable`, `facet_conflict`, `bad_request`, `payload_too_large`, `too_many_clients`, `internal_error`.
+  Stable error codes: `unknown_source`, `invalid_filter`, `invalid_query_syntax`, `filter_too_deep`, `invalid_time_range`, `time_range_too_large`, `buffer_full`, `segment_not_found`, `segment_busy`, `s3_unavailable`, `script_unavailable`, `rehydrate_unsupported`, `manifest_invalid`, `cursor_invalidated`, `field_not_reloadable`, `facet_conflict`, `bad_request`, `payload_too_large`, `too_many_clients`, `unauthorized`, `internal_error`.
 - **Redirects.** Trailing slashes redirect with `308`. Wrong method returns `405` with `Allow`.
 - **CORS.** `GET` and `OPTIONS` allow any origin. Mutations are same-origin only.
 
@@ -28,7 +28,7 @@ These `/api/*` endpoints are the supported public contract for scripting. The we
 
 Ingest a batch of NDJSON events from a producer (typically Vector).
 
-**Request headers:** `Content-Type: application/x-ndjson` (or `application/json`, `application/ndjson`, or empty). Optional `Content-Encoding: gzip`.
+**Request headers:** `Content-Type: application/x-ndjson` (or `application/json`, `application/ndjson`, or empty). Optional `Content-Encoding: gzip`. **Optional** `Authorization: Bearer <token>` - required only when the source has `ingest_tokens` configured (see [Sources and Extraction](sources-and-extraction.md#authenticating-ingest-with-bearer-tokens)). Sources without tokens accept unauthenticated POSTs.
 
 **Body:** NDJSON, decompressed size capped at 32 MB.
 
@@ -43,7 +43,7 @@ Ingest a batch of NDJSON events from a producer (typically Vector).
 { "accepted": 2, "skipped": 0 }
 ```
 
-**Errors:** `404 unknown_source`, `413 payload_too_large`, `415` (bad content type), `429 buffer_full` with `Retry-After: 1`.
+**Errors:** `401 unauthorized` (when the source has tokens configured and the request lacks a matching `Authorization: Bearer <token>`; response includes `WWW-Authenticate: Bearer`), `404 unknown_source`, `413 payload_too_large`, `415` (bad content type), `429 buffer_full` with `Retry-After: 1`.
 
 ## `POST /api/parse-query`
 

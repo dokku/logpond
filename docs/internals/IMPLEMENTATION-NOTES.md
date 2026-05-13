@@ -1009,3 +1009,54 @@ multi-provider archive matrix, #5 Parquet readability against a real
 populated dataset, #6 the under-30-minutes setup) need an operator pass.
 The status box flips when those pass; the PR landing this phase ships
 the tooling needed to run them.
+
+## Post-Phase 16: ingest token auth and Dokku internal routing
+
+### Per-source bearer tokens on `/ingest/<source>`
+
+Adds PRD §7.1.5: each source carries an optional `ingest_tokens` list;
+sources with one or more tokens require `Authorization: Bearer <token>`
+and otherwise return `401 unauthorized` (with `WWW-Authenticate: Bearer`).
+Sources with an empty list keep accepting unauthenticated POSTs, which is
+what local Vector does by default.
+
+- **Token storage.** Inline on the YAML source struct
+  (`internal/config/config.go`). Validation rejects empty tokens and
+  tokens containing whitespace. `LOGPOND_INGEST_TOKEN__<source>` is a
+  flat env-var sidecar that appends to the YAML list (deduped); it is
+  set-at-startup-only because a container's environment is fixed at
+  exec time.
+- **Reload.** The auth checker lives on `*api.Server` behind
+  `atomic.Pointer[map[string][]string]`. `cmd/logpond` wires
+  `reloader.tokenSink = srv.SetIngestTokens` so each successful
+  `POST /api/admin/reload` rebuilds the map and `Store`s the new pointer
+  in one operation; per-request reads use `Load` and are lock-free.
+- **Compare.** `crypto/subtle.ConstantTimeCompare` against every
+  configured token (not short-circuiting) so the number of configured
+  tokens does not leak through timing.
+- **Logging.** Failures emit a rate-limited (one per minute per source)
+  warning carrying the source name and the first 6 chars of the offered
+  token as a fingerprint. Successful auth is silent.
+- **Redaction.** `(*Config).Redacted()` blanks every
+  `sources[].ingest_tokens` entry like `archive.s3.secret_access_key`,
+  so both startup config logs and `GET /api/admin/config` are safe.
+- **Metric.** `logpond_ingest_auth_failures_total{source}`.
+- **Generator.** `logpond gen-token` (subcommand) emits
+  `lpk_live_<32 base64-url chars>` from `crypto/rand`. The `lpk_` prefix
+  is a recommendation, not enforced.
+
+### Vector internal-routing: superseded by Dokku 0.38.5
+
+The earlier iteration of this plan shipped a `contrib/dokku-vector-attach.sh`
+helper that ran `docker network connect dokku-logs vector-vector-1` after
+each `dokku logs:vector-start`, because Dokku's Vector container used
+`network_mode: bridge` exclusively and could not reach Logpond's
+`logpond.web` internal DNS alias.
+
+Dokku 0.38.5 (released 2026-05-12, resolving https://github.com/dokku/dokku/issues/8628
+via https://github.com/dokku/dokku/pull/8629) introduced a global
+`vector-networks` config on the `logs` plugin. The compose template now
+renders the configured networks as `external: true` attachments; when
+set, the Vector container leaves the default bridge entirely and joins
+only the configured user-defined networks. This makes the helper script
+unnecessary and is the documented path in `docs/dokku-deployment.md`.

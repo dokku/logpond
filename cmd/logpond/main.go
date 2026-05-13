@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -47,6 +49,16 @@ func main() {
 }
 
 func run() error {
+	// Subcommands are dispatched before flag.Parse so they can each
+	// own their own flag handling without colliding with the server's
+	// --version flag.
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "gen-token":
+			return runGenToken(os.Args[2:])
+		}
+	}
+
 	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
 	if *showVersion {
@@ -117,6 +129,7 @@ func run() error {
 	for _, src := range cfg.Sources {
 		extractors[src.Name] = ingest.NewExtractor(ingest.SourceFromConfig(src.Name, src.Extract))
 	}
+	initialTokens := buildTokenMap(cfg)
 
 	window, err := config.ParseDuration(cfg.SegmentWindow)
 	if err != nil {
@@ -234,7 +247,9 @@ func run() error {
 		Reload:          reloader.HandleReload,
 		StartTime:       startTime,
 		Version:         version,
+		IngestTokens:    initialTokens,
 	})
+	reloader.tokenSink = srv.SetIngestTokens
 
 	uiSrv, err := ui.New(ui.Options{
 		Logger:          logger,
@@ -580,11 +595,12 @@ func (r *liveTailRef) clientCount() int {
 // reloadable:"true" are allowed to differ; non-reloadable diffs cause
 // the reload to fail with 422 (field_not_reloadable).
 type reloader struct {
-	mu      sync.Mutex
-	path    string
-	current *config.Config
-	facets  *facets.Registry
-	logger  *slog.Logger
+	mu        sync.Mutex
+	path      string
+	current   *config.Config
+	facets    *facets.Registry
+	logger    *slog.Logger
+	tokenSink func(map[string][]string)
 }
 
 func newReloader(path string, current *config.Config, fr *facets.Registry, logger *slog.Logger) *reloader {
@@ -661,9 +677,31 @@ func (r *reloader) Reload(ctx context.Context) ([]string, error) {
 			return nil, fmt.Errorf("reloading facets: %w", err)
 		}
 	}
+	if r.tokenSink != nil {
+		r.tokenSink(buildTokenMap(next))
+	}
 	r.logger.Info("config reload applied", "changed_fields", changed)
 	r.current = next
 	return changed, nil
+}
+
+// buildTokenMap projects the source-list config into the per-source
+// token map the API server's auth checker consumes. Sources without
+// any tokens are omitted so the checker treats them as unauthenticated.
+func buildTokenMap(cfg *config.Config) map[string][]string {
+	if cfg == nil || len(cfg.Sources) == 0 {
+		return nil
+	}
+	out := make(map[string][]string, len(cfg.Sources))
+	for _, src := range cfg.Sources {
+		if len(src.IngestTokens) == 0 {
+			continue
+		}
+		tokens := make([]string, len(src.IngestTokens))
+		copy(tokens, src.IngestTokens)
+		out[src.Name] = tokens
+	}
+	return out
 }
 
 type reloadViolation struct {
@@ -709,6 +747,28 @@ func walkDiff(a, b reflect.Value, prefix string, out *[]string) {
 			*out = append(*out, path)
 		}
 	}
+}
+
+// runGenToken implements the `logpond gen-token` subcommand. It prints
+// a single `lpk_live_<32 base64-url chars>` token to stdout. Operators
+// paste the value into `sources[].ingest_tokens` or a
+// `LOGPOND_INGEST_TOKEN__<source>` env var (PRD §7.1.5).
+func runGenToken(args []string) error {
+	fs := flag.NewFlagSet("gen-token", flag.ContinueOnError)
+	prefix := fs.String("prefix", "lpk_live_", "prefix prepended to the random suffix")
+	bytesN := fs.Int("bytes", 24, "raw random bytes before base64-url encoding (32 chars encoded from 24 bytes)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *bytesN <= 0 {
+		return fmt.Errorf("gen-token: -bytes must be > 0")
+	}
+	buf := make([]byte, *bytesN)
+	if _, err := rand.Read(buf); err != nil {
+		return fmt.Errorf("gen-token: reading random bytes: %w", err)
+	}
+	fmt.Println(*prefix + base64.RawURLEncoding.EncodeToString(buf))
+	return nil
 }
 
 // ringBufferEventCap converts the configured ring-buffer memory limit

@@ -408,6 +408,7 @@ func TestRedacted_HidesSecrets(t *testing.T) {
 	c := Defaults()
 	c.Archive.S3.SecretAccessKey = "supersecret"
 	c.Archive.Script.Env = map[string]string{"PASSWORD": "x"}
+	c.Sources = []Source{{Name: "default", IngestTokens: []string{"lpk_live_abc"}}}
 	r := c.Redacted()
 	if r.Archive.S3.SecretAccessKey != "***" {
 		t.Errorf("secret not redacted: %q", r.Archive.S3.SecretAccessKey)
@@ -415,7 +416,74 @@ func TestRedacted_HidesSecrets(t *testing.T) {
 	if r.Archive.Script.Env["PASSWORD"] != "***" {
 		t.Errorf("env not redacted: %q", r.Archive.Script.Env["PASSWORD"])
 	}
+	if got := r.Sources[0].IngestTokens; len(got) != 1 || got[0] != "***" {
+		t.Errorf("ingest tokens not redacted: %#v", got)
+	}
 	if c.Archive.S3.SecretAccessKey != "supersecret" {
 		t.Errorf("original mutated: %q", c.Archive.S3.SecretAccessKey)
+	}
+	if c.Sources[0].IngestTokens[0] != "lpk_live_abc" {
+		t.Errorf("original source mutated: %q", c.Sources[0].IngestTokens[0])
+	}
+}
+
+func TestLoad_IngestTokenEnv_AppendsToYAMLSource(t *testing.T) {
+	t.Setenv("LOGPOND_INGEST_TOKEN__default", "lpk_live_one,lpk_live_two")
+	c, err := Load("")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	var idx = -1
+	for i := range c.Sources {
+		if c.Sources[i].Name == "default" {
+			idx = i
+		}
+	}
+	if idx < 0 {
+		t.Fatalf("default source missing from %+v", c.Sources)
+	}
+	got := c.Sources[idx].IngestTokens
+	if len(got) != 2 || got[0] != "lpk_live_one" || got[1] != "lpk_live_two" {
+		t.Errorf("tokens: %#v", got)
+	}
+}
+
+func TestLoad_IngestTokenEnv_DedupesAgainstYAML(t *testing.T) {
+	const yaml = `sources:
+  - name: default
+    ingest_tokens: [lpk_live_one]
+    extract: {timestamp: [timestamp]}
+`
+	dir := t.TempDir()
+	path := dir + "/c.yaml"
+	if err := os.WriteFile(path, []byte(yaml), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("LOGPOND_INGEST_TOKEN__default", "lpk_live_one,lpk_live_two")
+	c, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	got := c.Sources[0].IngestTokens
+	if len(got) != 2 || got[0] != "lpk_live_one" || got[1] != "lpk_live_two" {
+		t.Errorf("tokens: %#v", got)
+	}
+}
+
+func TestValidate_RejectsTokenWithWhitespace(t *testing.T) {
+	c := Defaults()
+	c.Sources = []Source{{Name: "default", IngestTokens: []string{"lpk live"}}}
+	err := c.Validate()
+	if err == nil || !strings.Contains(err.Error(), "whitespace") {
+		t.Fatalf("want whitespace error; got %v", err)
+	}
+}
+
+func TestValidate_RejectsEmptyToken(t *testing.T) {
+	c := Defaults()
+	c.Sources = []Source{{Name: "default", IngestTokens: []string{""}}}
+	err := c.Validate()
+	if err == nil || !strings.Contains(err.Error(), "empty token") {
+		t.Fatalf("want empty-token error; got %v", err)
 	}
 }

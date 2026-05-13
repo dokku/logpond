@@ -1,8 +1,8 @@
 # Logpond — Product Requirements Document
 
-**Status:** Draft v1.8
+**Status:** Draft v1.9
 **Owner:** TBD
-**Last updated:** 2026-05-12
+**Last updated:** 2026-05-13
 
 ---
 
@@ -36,7 +36,7 @@ The trade-off callouts make these choices visible so future maintainers and oper
 ### 3.2 Non-goals (v1)
 
 - Metrics, traces, or alerting on log content.
-- Multi-tenancy, role-based access control, or any authentication beyond what a reverse proxy provides.
+- Multi-tenancy, role-based access control, or any UI / query-side authentication beyond what a reverse proxy provides. The single ingest-path exception is per-source bearer tokens described in §7.1.5; see also §5.
 - Distributed or multi-node deployment.
 - Ingest protocols other than HTTP/NDJSON (gRPC, OTLP, syslog, etc.).
 - Server-side log parsing for arbitrary formats — parsing is delegated to Vector.
@@ -54,7 +54,7 @@ They are familiar with Datadog's log explorer UI (or willing to learn a similar 
 - The host has 2GB of total RAM and is shared with other Dokku applications; Logpond's memory budget is 256MB.
 - Logs are shipped exclusively by Vector and arrive as JSON. Vector's disk buffer is treated as the durability layer for in-flight events.
 - An S3-compatible object store is available *or* the operator has a script capable of archiving a single Parquet file to wherever they want it.
-- Authentication is handled outside the service in v1.
+- Authentication for the UI and query API is handled outside the service (reverse proxy). Ingest is the only path with in-process authentication, and only opt-in via per-source bearer tokens (§7.1.5); sources without tokens accept unauthenticated POSTs as before.
 - A single operator administers the service; concurrent admin actions are not a design concern.
 
 ## 6. Terminology
@@ -120,6 +120,24 @@ The original value is preserved in `attributes.logpond_level_original` when norm
 **Batch acceptance semantics.** 202 with `{"accepted": N, "skipped": M}`. Vector's disk buffer is the durability layer.
 
 **Backpressure.** Sustained backpressure → 429 with `Retry-After: 1`. Never silently dropped.
+
+#### 7.1.5 Authentication
+
+The ingest endpoint accepts an optional, opt-in `Authorization: Bearer <token>` header. Each configured source carries a list of accepted tokens; sources with an empty list accept unauthenticated POSTs (preserving the local-Vector default). Sources with at least one token require a matching bearer or return `401 unauthorized` with `WWW-Authenticate: Bearer`.
+
+This is a deliberate exception to §3.2's "auth is the reverse proxy's problem" stance. Ingest's trust boundary is different from the UI's — operators may want to accept logs from a CI runner or a remote app on a public URL while keeping the rest of the service on a per-host listener. Per-source rather than global lets a leaked token bounded to one source not write to others, and lets each source rotate on its own schedule.
+
+**Token storage.** Inline on the source config (`sources[i].ingest_tokens: [string]`). A flat env-var sidecar `LOGPOND_INGEST_TOKEN__<source_name>=<comma-separated tokens>` appends to the YAML list at startup (deduped). The YAML list is reloadable via `POST /api/admin/reload`; the env-var sidecar is set-at-startup-only because Docker / Dokku containers do not re-read their environment after `execve`.
+
+**Comparison.** Constant-time (`crypto/subtle.ConstantTimeCompare`) against each configured token; first match wins. Tokens are arbitrary non-empty strings with no internal whitespace; the documentation recommends a `lpk_live_` prefix plus 32 base64-url characters so leaked credentials are searchable.
+
+**Logging.** Auth failures emit a rate-limited (one per minute per source) warning log carrying the source name and the first 6 characters of the offered token as a fingerprint. Successful auth is silent.
+
+**Redaction.** `sources[].ingest_tokens` blank as `***` in `(*Config).Redacted()`, which feeds both startup config logs and `GET /api/admin/config`.
+
+**Metric.** `logpond_ingest_auth_failures_total{source}` increments on every 401.
+
+> **⚖ Trade-off.** Adding any in-process authentication contradicts §3.2's clean "delegate to the reverse proxy" principle. The cost is mitigated by keeping the surface narrow (one path, one mechanism) and the storage minimal (no catalog table, no token hashing, no rotation timestamps — file-level git history and operator discipline are the audit trail).
 
 ### 7.2 Storage layout
 
@@ -736,6 +754,8 @@ Source and facet definitions can be set as single JSON env vars (`LOGPOND_SOURCE
 | `archive.script.timeout`             | `LOGPOND_ARCHIVE_SCRIPT_TIMEOUT`        | `600s`                   | Yes        |
 | `archive.script.env.*`               | `LOGPOND_ARCHIVE_SCRIPT_ENV__*`         | (none)                   | Yes        |
 | `sources` (YAML)                     | `LOGPOND_SOURCES_JSON`                  | one `default` source     | Yes        |
+| `sources[].ingest_tokens`            | (see `LOGPOND_INGEST_TOKEN__*`)         | (none)                   | Yes        |
+| (n/a)                                | `LOGPOND_INGEST_TOKEN__<source>`        | (none)                   | No         |
 | `theme.default`                      | `LOGPOND_THEME_DEFAULT`                 | `auto`                   | Yes        |
 
 `facets.segment_sample_size` controls the N most recent sealed segments scanned for facet values and autocomplete.
@@ -1258,7 +1278,7 @@ Logpond does not provide a "comfortable" / "compact" toggle in v1. The density c
   }
   ```
 
-- Stable error codes: `unknown_source`, `invalid_filter`, `invalid_query_syntax`, `filter_too_deep`, `invalid_time_range`, `time_range_too_large`, `buffer_full`, `segment_not_found`, `segment_busy`, `s3_unavailable`, `script_unavailable`, `rehydrate_unsupported`, `manifest_invalid`, `cursor_invalidated`, `field_not_reloadable`, `facet_conflict`, `bad_request`, `payload_too_large`, `too_many_clients`, `internal_error`.
+- Stable error codes: `unknown_source`, `invalid_filter`, `invalid_query_syntax`, `filter_too_deep`, `invalid_time_range`, `time_range_too_large`, `buffer_full`, `segment_not_found`, `segment_busy`, `s3_unavailable`, `script_unavailable`, `rehydrate_unsupported`, `manifest_invalid`, `cursor_invalidated`, `field_not_reloadable`, `facet_conflict`, `bad_request`, `payload_too_large`, `too_many_clients`, `unauthorized`, `internal_error`.
 - Trailing slashes redirect (308). Wrong method returns 405 with `Allow`.
 - CORS: GET/OPTIONS allow `*`; mutations same-origin only.
 
@@ -1283,7 +1303,7 @@ The Go server also exposes HTML-fragment-returning sibling endpoints under `/ui/
 { "accepted": 2, "skipped": 0 }
 ```
 
-**Other responses.** 404 (`unknown_source`), 413 (`payload_too_large`), 415, 429 (`buffer_full` with `Retry-After: 1`).
+**Other responses.** 401 (`unauthorized`, with `WWW-Authenticate: Bearer`, when the source has tokens configured and the request lacks a matching one — §7.1.5), 404 (`unknown_source`), 413 (`payload_too_large`), 415, 429 (`buffer_full` with `Retry-After: 1`).
 
 ### 13.3 `POST /api/parse-query`
 
@@ -2194,7 +2214,7 @@ Catalog rebuild from scratch is supported: on startup, Logpond scans `/data/segm
 
 ## 18. Future enhancements (post-v1)
 
-- Per-source authentication tokens and multi-tenant data isolation.
+- Multi-tenant data isolation. (Per-source authentication tokens shipped in v1.x — see §7.1.5.)
 - Authentication for the web UI (basic auth, OAuth, SSO).
 - Per-segment FTS indexes for faster substring search.
 - Configurable attribute promotion (selected `attributes.*` fields stored as top-level columns).

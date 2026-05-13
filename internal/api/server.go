@@ -26,6 +26,7 @@ import (
 	"github.com/dokku/logpond/internal/retention"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
@@ -58,6 +59,7 @@ type Server struct {
 	reloadHandler   http.HandlerFunc
 	startTime       time.Time
 	version         string
+	auth            *authChecker
 }
 
 // Metrics is the subset of the central metrics struct that the API
@@ -94,6 +96,10 @@ type Options struct {
 	StartTime time.Time
 	// Version is reported by /healthz.
 	Version string
+	// IngestTokens is the initial source-name -> token-list map used by
+	// the per-source bearer-token check on /ingest. An empty map (or a
+	// nil value) means every source accepts unauthenticated POSTs (PRD §7.1.5).
+	IngestTokens map[string][]string
 }
 
 // New builds a Server with all currently-implemented routes registered.
@@ -114,6 +120,10 @@ func New(opts Options) *Server {
 		version = "0.0.0-dev"
 	}
 
+	var authCounter *prometheus.CounterVec
+	if opts.Metrics != nil {
+		authCounter = opts.Metrics.IngestAuthFailuresTotal
+	}
 	s := &Server{
 		router:          r,
 		logger:          opts.Logger,
@@ -136,6 +146,7 @@ func New(opts Options) *Server {
 		reloadHandler:   opts.Reload,
 		startTime:       start,
 		version:         version,
+		auth:            newAuthChecker(tokenMap(opts.IngestTokens), opts.Logger, authCounter),
 	}
 
 	r.Get("/healthz", s.handleHealthz)
@@ -177,6 +188,18 @@ func (s *Server) Handler() http.Handler { return s.router }
 // tree. Keeps /api/* and /ui/* sharing one mux without forcing the api
 // package to import the ui package.
 func (s *Server) Router() chi.Router { return s.router }
+
+// SetIngestTokens replaces the source-name -> token-list map used by
+// the per-source bearer-token check. Called by the reload coordinator
+// after a successful config reload. Safe for concurrent use with
+// in-flight requests; the underlying atomic.Pointer.Store swaps the
+// whole map in one operation.
+func (s *Server) SetIngestTokens(next map[string][]string) {
+	if s.auth == nil {
+		return
+	}
+	s.auth.store(tokenMap(next))
+}
 
 // healthzResponse mirrors PRD §13.24's success body. On 503 we add a
 // `reason` field describing what failed.
@@ -220,6 +243,10 @@ func (s *Server) handleIngest(w http.ResponseWriter, r *http.Request) {
 	ex, ok := s.extractors[sourceName]
 	if !ok {
 		writeError(w, http.StatusNotFound, "unknown_source", fmt.Sprintf("source %q is not configured", sourceName), nil)
+		return
+	}
+
+	if s.auth != nil && !s.auth.check(w, r, sourceName) {
 		return
 	}
 

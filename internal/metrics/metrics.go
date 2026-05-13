@@ -18,6 +18,7 @@ type Metrics struct {
 	// Counters.
 	IngestEventsTotal             *prometheus.CounterVec
 	IngestSkippedLinesTotal       *prometheus.CounterVec
+	IngestAuthFailuresTotal       *prometheus.CounterVec
 	ArchiveScriptInvocationsTotal *prometheus.CounterVec
 
 	// Gauges.
@@ -66,6 +67,12 @@ func New(opts Options) *Metrics {
 		Help: "Number of NDJSON lines skipped during ingest.",
 	}, []string{"source", "reason"})
 	reg.MustRegister(m.IngestSkippedLinesTotal)
+
+	m.IngestAuthFailuresTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "logpond_ingest_auth_failures_total",
+		Help: "Number of POST /ingest/:source requests rejected with 401 unauthorized (PRD §7.1.5).",
+	}, []string{"source"})
+	reg.MustRegister(m.IngestAuthFailuresTotal)
 
 	m.ArchiveScriptInvocationsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "logpond_archive_script_invocations_total",
