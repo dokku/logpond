@@ -10,7 +10,7 @@ By default Logpond reads `/etc/logpond/config.yaml`. Point it elsewhere with `LO
 docker run --rm -p 8080:8080 \
   -e LOGPOND_CONFIG=/etc/logpond/myconfig.yaml \
   -v /path/to/myconfig.yaml:/etc/logpond/myconfig.yaml:ro \
-  ghcr.io/dokku/logpond:latest
+  dokku/logpond:latest
 ```
 
 The file is plain YAML. A complete minimal example:

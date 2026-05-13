@@ -158,7 +158,7 @@ Requests must present `Authorization: Bearer <token>` whose value matches one of
 Generate a token with the bundled subcommand (32 base64-url characters, `lpk_live_` prefix):
 
 ```bash
-docker run --rm ghcr.io/dokku/logpond:latest gen-token
+docker run --rm dokku/logpond:latest gen-token
 # -> lpk_live_<random>
 ```
 

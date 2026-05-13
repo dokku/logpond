@@ -23,10 +23,10 @@ You will see these terms throughout the docs. They are not standard log-manageme
 The image is published multi-arch (`linux/amd64`, `linux/arm64`):
 
 ```bash
-docker pull ghcr.io/dokku/logpond:latest
+docker pull dokku/logpond:latest
 ```
 
-For production, pin a specific tag (for example `ghcr.io/dokku/logpond:v1.0.0` once cut) so an upstream release does not change behavior under you. For deploying on Dokku itself, see [Dokku Deployment](dokku-deployment.md).
+For production, pin a specific tag (for example `dokku/logpond:v1.0.0` once cut) so an upstream release does not change behavior under you. Published images are signed with cosign keyless-OIDC; you can verify with `cosign verify dokku/logpond:v1.0.0 --certificate-identity-regexp 'https://github.com/dokku/logpond/.*' --certificate-oidc-issuer https://token.actions.githubusercontent.com`. For deploying on Dokku itself, see [Dokku Deployment](dokku-deployment.md).
 
 ## Your first ingest
 
@@ -56,7 +56,7 @@ docker run --rm -p 8080:8080 \
   -e LOGPOND_CONFIG=/etc/logpond/config.yaml \
   -v /tmp/logpond.yaml:/etc/logpond/config.yaml:ro \
   -v /tmp/logpond-data:/data \
-  ghcr.io/dokku/logpond:latest
+  dokku/logpond:latest
 ```
 
 The `/data` mount is where Logpond writes its catalog, the active DuckDB segment, sealed Parquet files, and rehydrated segments. Without a host mount, all of that disappears when the container stops.

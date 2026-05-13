@@ -2057,7 +2057,7 @@ dokku config:set logpond \
 
 ```bash
 git init logpond-deploy && cd logpond-deploy
-echo "FROM ghcr.io/<owner>/logpond:1.8.0" > Dockerfile
+echo "FROM dokku/logpond:v1.0.0" > Dockerfile
 git add . && git commit -m "deploy logpond"
 git remote add dokku dokku@dokku.example.com:logpond
 git push dokku main
@@ -2075,7 +2075,7 @@ dokku storage:mount logpond /var/lib/dokku/data/storage/logpond-scripts:/etc/log
 If the script needs additional tools, extend the base image:
 
 ```dockerfile
-FROM ghcr.io/<owner>/logpond:1.8.0
+FROM dokku/logpond:v1.0.0
 RUN apk add --no-cache restic
 ```
 
@@ -2165,7 +2165,7 @@ If the underlying app emits structured JSON, those fields become queryable as `@
 ### 15.6 Upgrading
 
 ```bash
-echo "FROM ghcr.io/<owner>/logpond:1.9.0" > Dockerfile
+echo "FROM dokku/logpond:v1.1.0" > Dockerfile
 git add . && git commit -m "upgrade to 1.9.0"
 git push dokku main
 ```

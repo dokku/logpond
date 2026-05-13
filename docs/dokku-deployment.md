@@ -74,15 +74,15 @@ See [Archival](archival.md) for the full backend reference.
 The cleanest path is `git:from-image`, which deploys the published image directly without building anything on the Dokku host:
 
 ```bash
-dokku git:from-image logpond ghcr.io/dokku/logpond:latest
+dokku git:from-image logpond dokku/logpond:latest
 ```
 
-Pin a specific tag in production (for example `ghcr.io/dokku/logpond:v1.0.0` once cut) so an upstream release does not surprise you. If you want to extend the image - to bake a custom archive script in, for example - point a tiny Dockerfile-based git deploy at Dokku instead:
+Pin a specific tag in production (for example `dokku/logpond:v1.0.0` once cut) so an upstream release does not surprise you. If you want to extend the image - to bake a custom archive script in, for example - point a tiny Dockerfile-based git deploy at Dokku instead:
 
 ```bash
 git init logpond-deploy && cd logpond-deploy
 cat >Dockerfile <<'EOF'
-FROM ghcr.io/dokku/logpond:latest
+FROM dokku/logpond:latest
 RUN apt-get update && apt-get install -y --no-install-recommends restic \
  && rm -rf /var/lib/apt/lists/*
 EOF
@@ -245,13 +245,13 @@ If the underlying app emits structured JSON, every JSON field becomes queryable 
 For a `git:from-image` deploy, point at the new tag and re-deploy:
 
 ```bash
-dokku git:from-image logpond ghcr.io/dokku/logpond:v1.1.0
+dokku git:from-image logpond dokku/logpond:v1.1.0
 ```
 
 For a Dockerfile-based deploy, edit the `FROM` line and push:
 
 ```bash
-echo "FROM ghcr.io/dokku/logpond:v1.1.0" > Dockerfile
+echo "FROM dokku/logpond:v1.1.0" > Dockerfile
 git commit -am "upgrade to v1.1.0"
 git push dokku main
 ```
