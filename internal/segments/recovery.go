@@ -107,6 +107,14 @@ func (m *Manager) Recover(ctx context.Context) (RecoverResult, error) {
 		result.LostMarked = append(result.LostMarked, id)
 	}
 
+	// Reopen surviving active segments so queries and the sealing loop can
+	// access their persisted events, including windows from before startup.
+	for id := range activeFiles {
+		if _, err := m.openOrCreate(ctx, id); err != nil {
+			return result, fmt.Errorf("reopening recovered active %s: %w", id, err)
+		}
+	}
+
 	return result, nil
 }
 
