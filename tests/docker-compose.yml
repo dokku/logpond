@@ -1,6 +1,6 @@
 services:
   registry:
-    image: registry:2
+    image: registry:3
     container_name: logpond-test-registry
     restart: unless-stopped
     network_mode: host
