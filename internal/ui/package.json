@@ -4,9 +4,9 @@
   "private": true,
   "description": "Version-of-record for the frontend assets vendored by scripts/vendor.sh. Nothing is built or installed from npm; these exact pins exist so Dependabot can bump them. Keep this file OUT of internal/ui/static/ - //go:embed all:static would embed node_modules.",
   "dependencies": {
-    "alpinejs": "3.14.9",
-    "htmx-ext-ws": "2.0.2",
-    "htmx.org": "2.0.4",
-    "open-props": "1.7.13"
+    "alpinejs": "3.17.3",
+    "htmx-ext-ws": "2.0.4",
+    "htmx.org": "2.0.10",
+    "open-props": "1.7.23"
   }
 }
