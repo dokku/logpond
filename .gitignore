@@ -10,3 +10,8 @@ tmp/
 internal/ui/static/vendor/*
 !internal/ui/static/vendor/.gitkeep
 !internal/ui/static/vendor/README.md
+
+# internal/ui/package.json is only the version-of-record for the vendored
+# frontend assets (see scripts/vendor.sh); nothing is ever installed from
+# npm, so no node_modules should ever appear here.
+internal/ui/node_modules/

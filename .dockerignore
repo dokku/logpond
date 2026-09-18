@@ -1,0 +1,8 @@
+# The image build only needs sources: scripts/vendor.sh re-fetches the
+# frontend assets and `go build` produces the binary from scratch.
+.git
+tmp/
+**/node_modules
+/logpond
+/loadgen
+/querybench

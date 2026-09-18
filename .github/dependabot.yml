@@ -1,0 +1,124 @@
+version: 2
+
+# Grouping is uniform across ecosystems: minor and patch updates collapse
+# into one PR per ecosystem, while majors get their own PR so a breaking
+# bump is never hidden inside a batch. Security updates are grouped
+# separately so they are never held behind a version-update batch.
+#
+# Deliberately not covered, because Dependabot cannot resolve them:
+#   - tests/dokku/Dockerfile   FROM dokku/dokku:${DOKKU_VERSION} is
+#                              ARG-templated.
+#   - bump-version.yaml        docker://ghcr.io/dokku/semver-generator is a
+#                              docker:// step reference, which the
+#                              github-actions ecosystem does not update.
+#   - tests/docker-compose.yml minio/minio and minio/mc are pinned to
+#                              :latest, so only registry:2 is updatable.
+
+updates:
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 10
+    commit-message:
+      prefix: chore
+    groups:
+      go:
+        applies-to: version-updates
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+      go-security:
+        applies-to: security-updates
+        patterns:
+          - "*"
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    commit-message:
+      prefix: ci
+    groups:
+      github-actions:
+        applies-to: version-updates
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+      github-actions-security:
+        applies-to: security-updates
+        patterns:
+          - "*"
+
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    commit-message:
+      prefix: chore
+    groups:
+      docker:
+        applies-to: version-updates
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+      docker-security:
+        applies-to: security-updates
+        patterns:
+          - "*"
+
+  - package-ecosystem: docker-compose
+    directory: /tests
+    schedule:
+      interval: weekly
+      day: monday
+    commit-message:
+      prefix: chore
+    groups:
+      docker-compose:
+        applies-to: version-updates
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+      docker-compose-security:
+        applies-to: security-updates
+        patterns:
+          - "*"
+
+  # The frontend assets vendored by scripts/vendor.sh. Nothing is installed
+  # from npm: the script reads the resolved versions out of package-lock.json
+  # and curls the files from a CDN. package.json carries exact pins so every
+  # bump is a reviewable one-line diff that vendor.sh cross-checks against
+  # the lockfile. Do NOT set versioning-strategy: lockfile-only here - with
+  # exact pins the lockfile can never move on its own, so that would yield
+  # zero updates.
+  - package-ecosystem: npm
+    directory: /internal/ui
+    schedule:
+      interval: weekly
+      day: monday
+    commit-message:
+      prefix: chore
+    groups:
+      frontend:
+        applies-to: version-updates
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+      frontend-security:
+        applies-to: security-updates
+        patterns:
+          - "*"
