@@ -1,4 +1,4 @@
-FROM golang:1.26-bookworm AS builder
+FROM golang:1.27-bookworm AS builder
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends build-essential bash curl ca-certificates jq \
