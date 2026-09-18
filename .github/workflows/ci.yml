@@ -31,3 +31,17 @@ jobs:
         with:
           go-version-file: go.mod
       - run: go test ./...
+
+  vendor:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Proves internal/ui/package-lock.json agrees with package.json and
+      # that every pinned version still resolves to a real CDN path. Without
+      # this, a bad pin would first surface during the release image build.
+      - run: bash scripts/vendor.sh
+      - run: |
+          for f in htmx.min.js htmx-ws.js alpine.min.js open-props.min.css; do
+            test -s "internal/ui/static/vendor/$f" || { echo "missing $f" >&2; exit 1; }
+          done
+          cat internal/ui/static/vendor/VERSIONS

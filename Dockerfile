@@ -1,7 +1,7 @@
 FROM golang:1.26-bookworm AS builder
 
 RUN apt-get update \
- && apt-get install -y --no-install-recommends build-essential bash curl ca-certificates \
+ && apt-get install -y --no-install-recommends build-essential bash curl ca-certificates jq \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src

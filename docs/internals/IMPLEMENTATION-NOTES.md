@@ -597,9 +597,12 @@ PRD §7.3.4 only specifies case-insensitive substring.
 Reasons for keeping the minified blobs out of git:
 - The four files weigh ~55KB minified but balloon the diff noise on
   every dependency bump.
-- The single `scripts/vendor.sh` is the canonical source of pin info
-  (the `VERSIONS` file is regenerated on each run), avoiding two
-  parallel "which version is current" sources.
+- `internal/ui/package.json` is the canonical source of pin info, so
+  Dependabot can bump the assets like any other npm dependency;
+  `scripts/vendor.sh` reads the resolved versions back out of
+  `internal/ui/package-lock.json` and cross-checks the two, which keeps
+  a single "which version is current" source despite the extra file.
+  (`VERSIONS` is still regenerated on each run.)
 - Local dev and Dockerfile share one workflow.
 
 The vendor directory lives directly under the package that owns the
